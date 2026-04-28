@@ -1,0 +1,19 @@
+{
+  "colors": [
+    { "name": "primary", "value": "#22D3EE", "usage": 14 },
+    { "name": "secondary", "value": "#0F172A", "usage": 9 },
+    { "name": "accent", "value": "#F472B6", "usage": 5 },
+    { "name": "neutral-1", "value": "#FFFFFF", "usage": 22 },
+    { "name": "neutral-2", "value": "#CBD5E1", "usage": 11 },
+    { "name": "neutral-3", "value": "#1F2937", "usage": 6 }
+  ],
+  "typography": [
+    { "name": "h1", "fontFamily": "Inter", "fontWeight": 700, "fontSize": 56, "lineHeight": 64, "letterSpacing": -1 },
+    { "name": "h2", "fontFamily": "Inter", "fontWeight": 700, "fontSize": 40, "lineHeight": 48, "letterSpacing": null },
+    { "name": "h3", "fontFamily": "Inter", "fontWeight": 600, "fontSize": 24, "lineHeight": 32, "letterSpacing": null },
+    { "name": "body", "fontFamily": "Inter", "fontWeight": 400, "fontSize": 16, "lineHeight": 24, "letterSpacing": null },
+    { "name": "small", "fontFamily": "Inter", "fontWeight": 400, "fontSize": 14, "lineHeight": 20, "letterSpacing": null }
+  ],
+  "spacing": [4, 8, 12, 16, 24, 32, 48, 64, 96],
+  "radii": [4, 8, 12, 24]
+}

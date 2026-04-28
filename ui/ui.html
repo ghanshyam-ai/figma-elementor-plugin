@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Elementor Exporter</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1f1f1f;
+        --muted: #6b6b6b;
+        --border: #e5e5e5;
+        --primary: #18a0fb;
+        --primary-hover: #0d8de0;
+        --danger: #d93025;
+        --warn: #b06000;
+        --success: #137333;
+        --surface: #f7f7f7;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #2c2c2c;
+          --fg: #ffffff;
+          --muted: #b3b3b3;
+          --border: #444;
+          --surface: #383838;
+        }
+      }
+      html, body { margin: 0; height: 100%; font-family: Inter, system-ui, sans-serif; font-size: 12px; color: var(--fg); background: var(--bg); }
+      body { display: flex; flex-direction: column; }
+      header { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+      header h1 { font-size: 13px; font-weight: 600; margin: 0; }
+      header p { margin: 4px 0 0; color: var(--muted); }
+      main { flex: 1; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+      .selection {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+      }
+      .selection .label { color: var(--muted); }
+      .selection .value { font-weight: 500; flex: 1; text-align: right; word-break: break-word; }
+      .row { display: flex; gap: 8px; }
+      button {
+        flex: 1;
+        appearance: none;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--fg);
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      button:hover { background: var(--border); }
+      button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+      button.primary:hover { background: var(--primary-hover); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .progress {
+        height: 6px;
+        background: var(--surface);
+        border-radius: 3px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+      }
+      .progress > div {
+        height: 100%;
+        background: var(--primary);
+        width: 0%;
+        transition: width 0.2s ease;
+      }
+      .stats { color: var(--muted); }
+      .stats strong { color: var(--fg); }
+      .log {
+        flex: 1;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 11px;
+        line-height: 1.5;
+        min-height: 120px;
+        max-height: 220px;
+      }
+      .log .line { white-space: pre-wrap; }
+      .log .info { color: var(--fg); }
+      .log .warn { color: var(--warn); }
+      .log .error { color: var(--danger); }
+      footer { padding: 10px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Elementor Exporter</h1>
+      <p>Extract a Figma design to a ZIP package for Elementor.</p>
+    </header>
+    <main>
+      <div class="selection">
+        <span class="label">Selection:</span>
+        <span class="value" id="selection">–</span>
+        <button id="reselect" style="flex:0; padding:4px 8px;">Refresh</button>
+      </div>
+      <div class="row">
+        <button id="extract" class="primary">Extract design</button>
+        <button id="download" disabled>Download ZIP</button>
+      </div>
+      <div class="progress"><div id="bar"></div></div>
+      <div class="stats" id="stats">No extraction yet.</div>
+      <div class="log" id="log"></div>
+    </main>
+    <footer>
+      <span>v0.1.0</span>
+      <a href="#" id="close">Close</a>
+    </footer>
+    <!--SCRIPT-->
+  </body>
+</html>

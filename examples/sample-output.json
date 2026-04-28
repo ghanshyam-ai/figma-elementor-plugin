@@ -1,0 +1,124 @@
+{
+  "version": "0.4",
+  "title": "Landing — Hero",
+  "type": "page",
+  "page_settings": {},
+  "content": [
+    {
+      "id": "el00001",
+      "elType": "container",
+      "isInner": false,
+      "settings": {
+        "content_width": "full",
+        "flex_direction": "column",
+        "flex_gap": { "unit": "px", "size": 32, "sizes": [] },
+        "flex_justify_content": "center",
+        "flex_align_items": "center",
+        "padding": {
+          "unit": "px",
+          "top": "96",
+          "right": "120",
+          "bottom": "96",
+          "left": "120",
+          "isLinked": false
+        },
+        "background_background": "classic",
+        "background_color": "#0F172A",
+        "min_height": { "unit": "px", "size": 720, "sizes": [] },
+        "_figma_id": "1:23",
+        "_figma_name": "Hero"
+      },
+      "elements": [
+        {
+          "id": "el00002",
+          "elType": "widget",
+          "widgetType": "heading",
+          "settings": {
+            "title": "Build websites without the friction",
+            "header_size": "h1",
+            "align": "center",
+            "title_color": "#FFFFFF",
+            "typography_typography": "custom",
+            "typography_font_family": "Inter",
+            "typography_font_size": { "unit": "px", "size": 56, "sizes": [] },
+            "typography_font_weight": 700,
+            "typography_line_height": { "unit": "px", "size": 64, "sizes": [] },
+            "_figma_id": "1:24"
+          },
+          "elements": []
+        },
+        {
+          "id": "el00003",
+          "elType": "widget",
+          "widgetType": "text-editor",
+          "settings": {
+            "editor": "<p>Drop a Figma file. Get a working Elementor page.</p>",
+            "align": "center",
+            "text_color": "#CBD5E1",
+            "typography_typography": "custom",
+            "typography_font_family": "Inter",
+            "typography_font_size": { "unit": "px", "size": 18, "sizes": [] },
+            "typography_font_weight": 400,
+            "_figma_id": "1:25"
+          },
+          "elements": []
+        },
+        {
+          "id": "el00004",
+          "elType": "container",
+          "isInner": true,
+          "settings": {
+            "flex_direction": "row",
+            "flex_gap": { "unit": "px", "size": 16, "sizes": [] },
+            "_figma_id": "1:26",
+            "_figma_name": "CTA Group"
+          },
+          "elements": [
+            {
+              "id": "el00005",
+              "elType": "widget",
+              "widgetType": "button",
+              "settings": {
+                "text": "Get started",
+                "background_color": "#22D3EE",
+                "border_radius": {
+                  "unit": "px",
+                  "top": "8", "right": "8", "bottom": "8", "left": "8",
+                  "isLinked": true
+                },
+                "_figma_id": "1:27",
+                "_figma_name": "Primary Button"
+              },
+              "elements": []
+            },
+            {
+              "id": "el00006",
+              "elType": "widget",
+              "widgetType": "button",
+              "settings": {
+                "text": "Watch demo",
+                "_figma_id": "1:28",
+                "_figma_name": "Secondary Button"
+              },
+              "elements": []
+            }
+          ]
+        },
+        {
+          "id": "el00007",
+          "elType": "widget",
+          "widgetType": "image",
+          "settings": {
+            "image": { "url": "assets/images/img_1.png", "id": "img_1" },
+            "image_size": "full",
+            "width": { "unit": "px", "size": 960, "sizes": [] },
+            "height": { "unit": "px", "size": 540, "sizes": [] },
+            "_figma_id": "1:29",
+            "_figma_name": "Hero Visual"
+          },
+          "elements": []
+        }
+      ]
+    }
+  ]
+}
