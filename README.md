@@ -8,12 +8,11 @@ The ZIP contains:
 ```
 export/
 ├── ai-layout.json     # Compact AI-friendly summary (page type + sections + content)
-├── tokens.json        # Design tokens: colors, typography, Figma styles, variables, semantic map
-├── global.json        # Same as tokens.json, kept for backwards-compat
+├── global.json        # Design tokens: colors, typography, Figma styles, variables, semantic map
 ├── assets.json        # Asset manifest: type / format / alt / decorative flag
+├── tags.json          # Developer-authored widget + section-purpose overrides
 ├── validation.json    # Warnings (unnamed layers, absolute layout, mixed fonts, ...)
 ├── data.json          # Elementor template (containers + widgets) — preview/debug
-├── raw.json           # Full extracted Figma node tree (semantic roles + computed styles)
 ├── metadata.json      # File / page / counts
 ├── screenshots/
 │   └── <frame>.png    # 2× PNG of each selected frame
@@ -37,7 +36,9 @@ Requires Node 18+ and the Figma desktop app.
 
 ```bash
 npm install
-npm run build
+npm run build         # bundles plugin + UI
+npm run type-check    # tsc --noEmit
+npm test              # node --test, no extra dev deps
 ```
 
 Then in Figma desktop:
@@ -52,8 +53,62 @@ For live rebuilds while developing, run `npm run watch` in another terminal.
 
 1. Open a Figma file and select one or more frames (or run with no
    selection to export every top-level frame on the current page).
-2. Click **Extract design** in the plugin panel.
-3. When extraction finishes, click **Download ZIP**.
+2. (Optional) **Tag widgets & section purposes** — see below.
+3. Click **Extract design** in the plugin panel.
+4. When extraction finishes, click **Download ZIP**.
+
+### Tagging widgets and section purposes
+
+The plugin auto-detects most widgets and section purposes, but you can
+override the heuristic on any node. Open **Tag widgets & sections** in
+the plugin, select **one or more** Figma nodes, then:
+
+- **Widget hint** – pick from the full Elementor widget catalog (vocab
+  is defined in `src/catalog.ts`). Container widgets include tabs,
+  accordion, carousels, icon-list, price-table, posts, form, nav-menu.
+  Leaf widgets include counter, progress, star-rating, social-icons,
+  video, image-box, image, button, heading, text-editor, icon.
+- **Section purpose** – pick a granular page-section intent (hero,
+  navbar, header, footer, cta, lead-capture, feature-grid, pricing,
+  testimonial, faq, stats, social-proof, trust, trust-row, gallery,
+  blog-grid, content).
+
+Tags are stored on the Figma node via `setPluginData` and survive across
+plugin runs and file reopens. During extraction the plugin reads these
+overrides and stamps them on the AI layout / Elementor settings as
+authoritative — the agent treats user tags as ground truth.
+
+- **Multi-select tagging** – apply one tag to N nodes in a single pass.
+- **`auto: <widget>` pill** – the dropdown labels show the heuristic's
+  best guess next to the override; click the pill to accept it.
+- **Suggest tags** – sweep every top-level frame on the page, present
+  proposed widget / purpose tags with confidence scores, and let you
+  accept-some / accept-all in one bulk action.
+- **Preflight check** – run the brand-color hygiene check (and any
+  future token-only validation) without doing a full export pass.
+- **Clear all tags** – wipe every user-authored override on the page.
+- **Currently tagged on this page** – running list of every override;
+  click a row to jump back to the node in Figma.
+- **`tags.json`** – every override is also dumped into the ZIP for
+  reviewers, alongside `validation.json` / `ai-layout.json`.
+
+### Annotations the agent should consume
+
+The exporter emits several `_figma_*` and `_widget_hint*` annotations on
+every Elementor `settings` block (in `data.json`) and on each AI section
+(in `ai-layout.json`):
+
+| Field | Meaning |
+|---|---|
+| `_figma_id`, `_figma_name` | Source Figma node id and layer name |
+| `_ai_role`, `_ai_confidence` | Plugin-classified semantic role + confidence |
+| `_figma_section_purpose` | Top-level intent (`hero`, `pricing`, `trust-row`, ...) |
+| `_figma_section_purpose_source` | `user` or `auto` |
+| `_ai_preferred_widget` | Heuristic Elementor widget choice |
+| `_widget_hint` | Authoritative widget hint (user-tagged or counter/logo-strip auto) |
+| `_widget_hint_source` | `user` or `auto` |
+| `_figma_counter` | Parsed counter source `{ raw, value, prefix, suffix, label }` |
+| `_figma_instance_group` | Component-template group id for repeated cards |
 
 ## Architecture
 
@@ -99,6 +154,17 @@ boundary via `figma.ui.postMessage`.
   styles or variables, they are extracted into `tokens.json` with semantic
   dot-paths (`color.primary`, `font.heading.size`, ...). Otherwise the
   tokens fall back to usage-frequency heuristics.
+- **Spacing array contract.** `tokens.spacing` is an ascending-sorted
+  deduplicated list of every non-zero `itemSpacing` / padding value seen
+  in the file. The semantic shortcuts make the ordering contract explicit:
+  - `spacing.widget_gap` → `spacing[0]` (smallest, typical inter-widget gap)
+  - `spacing.section_gap` → `spacing[middle]` (inter-section gap)
+  - `spacing.section_padding` → `spacing[last]` (outer hero/section padding)
+- **Typography completeness.** Every distinct (family, weight, size)
+  combination used in the file lands in `tokens.typography`. Entries
+  whose `fontFamily` arrived as `figma.mixed`/null fall back to the
+  file's most-used family, with `fontFamilyFallback: true` flagged so
+  consumers know it's a best guess.
 - **Icons and logos export as SVG when possible.** Frames classified as
   `icon` or `logo` (by name or by being a small square vector group) are
   exported via `exportAsync({ format: 'SVG' })`, falling back to PNG@2× if

@@ -133,11 +133,32 @@ function stampFigmaMetadata(el: ElementorElement, node: ExtractedNode): void {
   s._figma_name = node.name;
   if (node.semanticRole) s._ai_role = node.semanticRole;
   if (typeof node.confidence === 'number') s._ai_confidence = node.confidence;
-  if (el.elType === 'container' && node.sectionPurpose) {
+  // Section purpose travels on container *and* widget settings — a logo
+  // strip wraps each image in a widget, and the purpose is still useful
+  // information for the agent there.
+  if (node.sectionPurpose) {
     s._figma_section_purpose = node.sectionPurpose;
+    if (node.sectionPurposeSource) s._figma_section_purpose_source = node.sectionPurposeSource;
   }
   if (node.preferredWidget && el.elType === 'widget') {
     s._ai_preferred_widget = node.preferredWidget;
+  }
+  // Authoritative widget hint (user-tagged or counter/logo-strip auto-tag).
+  if (node.widgetHint) {
+    s._widget_hint = node.widgetHint;
+    if (node.widgetHintSource) s._widget_hint_source = node.widgetHintSource;
+  }
+  // Counter source values — parsed value + suffix + label so the agent can
+  // wire an Elementor counter widget directly instead of regex-parsing the
+  // heading at render time.
+  if (node.counterHint) {
+    s._figma_counter = {
+      raw: node.counterHint.raw,
+      value: node.counterHint.value,
+      prefix: node.counterHint.prefix,
+      suffix: node.counterHint.suffix,
+      label: node.counterHint.label,
+    };
   }
   if (node.contentPriority) s._ai_priority = node.contentPriority;
   // The full structural fingerprint is recursive (a parent embeds every

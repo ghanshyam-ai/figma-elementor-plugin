@@ -7,6 +7,7 @@ import type {
   AssetManifestEntry,
   ComponentTemplate,
   ContentPriority,
+  DesignTokens,
   ExtractedNode,
   IconHint,
   SectionPurpose,
@@ -15,6 +16,7 @@ import type {
   ValidationWarning,
 } from './types';
 import { inferResponsive } from './extractor';
+import { brandColorHygieneWarnings } from './tokens';
 
 // Summarises the extracted Figma tree into a compact, AI-friendly JSON
 // document that downstream agents can reason about cheaply (Claude Code,
@@ -112,10 +114,14 @@ function summarize(node: ExtractedNode, topLevel = false): AISection {
   if (node.layoutPattern) out.layoutPattern = node.layoutPattern;
   if (node.breakpoints) out.breakpoints = node.breakpoints;
   if (node.sectionPurpose) out.sectionPurpose = node.sectionPurpose;
+  if (node.sectionPurposeSource) out.sectionPurposeSource = node.sectionPurposeSource;
   if (node.contentPriority) out.contentPriority = node.contentPriority;
   if (node.importance) out.importance = node.importance;
   if (node.isDecorative) out.isDecorative = true;
   if (node.preferredWidget) out.preferredWidget = node.preferredWidget;
+  if (node.widgetHint) out.widgetHint = node.widgetHint;
+  if (node.widgetHintSource) out.widgetHintSource = node.widgetHintSource;
+  if (node.counterHint) out.counterHint = node.counterHint;
   // Only emit per-node fingerprints when the node belongs to an instance
   // group — for grouped nodes the agent reads the canonical descriptor
   // from layout.componentTemplates. Ungrouped nodes have nothing to match
@@ -273,11 +279,20 @@ const PURPOSE_RX = {
   cta: /\b(cta|call[-_ ]?to[-_ ]?action|get[-_ ]?started|sign[-_ ]?up)\b/i,
   socialProof: /\b(social[-_ ]?proof|trusted[-_ ]?by|partners?|clients?|brands?|press|featured[-_ ]?in)\b/i,
   trust: /\b(secure|guarantee|trust|certified|verified|badge)\b/i,
+  // Narrower row-of-logos pattern: "logos", "client logos", "logo strip",
+  // "as seen in", "as featured in", "press" without other content.
+  trustRow: /\b(logo[s]?[-_ ]?(strip|row|grid|cloud)?|as[-_ ]?(seen|featured)[-_ ]?in)\b/i,
+  // Stats section — counters of customers/numbers/results.
+  stats: /\b(stats|statistics|by[-_ ]the[-_ ]numbers|metrics|numbers|results)\b/i,
   leadCapture: /\b(newsletter|subscribe|lead|signup|sign[-_ ]?up|contact[-_ ]?us|capture)\b/i,
   comparison: /\b(compare|comparison|vs\.?)\b/i,
   gallery: /\b(gallery|portfolio|showcase|images)\b/i,
   pricing: /\b(pricing|plans?|tier|subscription)\b/i,
   blog: /\b(blog|posts?|articles?|news|stories|insights?)\b/i,
+  // "header" appears in names that mean the top page strip without a nav
+  // (e.g. "PageHeader", "Header / Title"). The classifier emits navbar when
+  // a real navigation is detected; we pick this up as a fallback.
+  header: /\b(page[-_ ]?header|site[-_ ]?header|top[-_ ]?bar)\b/i,
 };
 
 // Text-content signals that indicate a blog/post grid rather than a
@@ -328,7 +343,7 @@ function countDescendants(node: ExtractedNode): RoleCounts {
   return c;
 }
 
-function detectSectionPurpose(node: ExtractedNode): SectionPurpose {
+export function detectSectionPurpose(node: ExtractedNode): SectionPurpose {
   const role = node.semanticRole;
   if (role === 'hero') return 'hero';
   if (role === 'navbar') return 'navbar';
@@ -337,6 +352,22 @@ function detectSectionPurpose(node: ExtractedNode): SectionPurpose {
   const name = node.name.toLowerCase();
   const counts = countDescendants(node);
 
+  // Structural header detection — top of page, short and wide, with a
+  // logo plus button/menu content. Catches "Header" frames that didn't
+  // match the navbar regex but clearly are the page's top strip.
+  if (looksLikeStructuralHeader(node, counts)) return 'header';
+
+  // Trust row / logo strip first — narrower than social-proof so it wins
+  // when both signals fire. Requires either an explicit name or a row
+  // shape (≥3 logos, no testimonials, no buttons).
+  if (PURPOSE_RX.trustRow.test(name) || (counts.logo >= 3 && counts.text === 0 && counts.button === 0)) {
+    return 'trust-row';
+  }
+  // Stats / counter section — detected on counter presence in descendants
+  // or an explicit "stats / by the numbers" name.
+  if (PURPOSE_RX.stats.test(name) || hasCounters(node)) {
+    return 'stats';
+  }
   // Form-driven intents take priority over name signals.
   if (counts.form > 0 || counts.input >= 2 || PURPOSE_RX.leadCapture.test(name)) {
     return 'lead-capture';
@@ -347,6 +378,7 @@ function detectSectionPurpose(node: ExtractedNode): SectionPurpose {
   if (PURPOSE_RX.comparison.test(name)) return 'feature-comparison';
   if (PURPOSE_RX.socialProof.test(name) || (counts.logo >= 3 && counts.text <= 2)) return 'social-proof';
   if (PURPOSE_RX.trust.test(name)) return 'trust';
+  if (PURPOSE_RX.header.test(name)) return 'header';
   if (PURPOSE_RX.gallery.test(name) || (counts.image >= 4 && counts.text <= 2)) return 'gallery';
   if (PURPOSE_RX.cta.test(name) || (counts.button >= 1 && counts.text <= 3 && counts.card === 0)) return 'cta';
   if (counts.card >= 3) {
@@ -354,6 +386,55 @@ function detectSectionPurpose(node: ExtractedNode): SectionPurpose {
     return 'feature-grid';
   }
   return 'content';
+}
+
+// A short, wide, page-top frame containing a logo and some buttons or
+// menu items, but no big hero copy. Distinguishes a header strip from a
+// hero — heroes typically have a large heading and span the viewport.
+function looksLikeStructuralHeader(node: ExtractedNode, counts: RoleCounts): boolean {
+  if (node.depth !== undefined && node.depth > 1) return false;
+  if (!node.absoluteBounds) return false;
+  const bounds = node.absoluteBounds;
+  // Short relative to width; sitting near the top of the page.
+  const isShort = bounds.height <= 160;
+  const isWide = bounds.width >= 768;
+  if (!isShort || !isWide) return false;
+  // Must contain a logo OR a menu-like cluster.
+  const hasLogoLike = counts.logo >= 1 || counts.image >= 1;
+  if (!hasLogoLike) return false;
+  // Should not contain hero-sized headings (would be a hero instead).
+  if (hasHeadingLargerThan(node, 28)) return false;
+  // Must have either nav children (button / text label rows) — pure-image
+  // strips are trust rows, not headers.
+  if (counts.button === 0 && counts.text < 2) return false;
+  return true;
+}
+
+function hasHeadingLargerThan(node: ExtractedNode, threshold: number): boolean {
+  let found = false;
+  function walk(n: ExtractedNode) {
+    if (found) return;
+    if (n.text && (n.text.fontSize ?? 0) >= threshold) { found = true; return; }
+    for (const c of n.children) walk(c);
+  }
+  for (const c of node.children) walk(c);
+  return found;
+}
+
+// True when the section contains at least one parsed counter (numeric
+// heading flagged by extractor.detectAndStampCounters).
+function hasCounters(node: ExtractedNode): boolean {
+  let found = false;
+  function walk(n: ExtractedNode) {
+    if (found) return;
+    if (n.widgetHint === 'counter' && n.counterHint) {
+      found = true;
+      return;
+    }
+    for (const c of n.children) walk(c);
+  }
+  for (const c of node.children) walk(c);
+  return found;
 }
 
 // Inspect the descendants' text content for blog-grid signals: at least
@@ -395,8 +476,13 @@ function assignSectionPurpose(node: ExtractedNode, depth: number): void {
   // wrapper still gets its sections tagged.
   const isStructural = !!role && STRUCTURAL_LIKE.indexOf(role) !== -1;
   const isClassicSection = !!role && SECTION_LIKE.indexOf(role) !== -1;
-  if (depth === 0 || isClassicSection || (isStructural && depth <= 2)) {
+  const shouldStamp = depth === 0 || isClassicSection || (isStructural && depth <= 2);
+  // User overrides win — never overwrite a developer-authored tag, and
+  // never overwrite an auto-tag stamped earlier in extractor (logo-strip).
+  const alreadyTagged = !!node.sectionPurpose;
+  if (shouldStamp && !alreadyTagged) {
     node.sectionPurpose = detectSectionPurpose(node);
+    if (!node.sectionPurposeSource) node.sectionPurposeSource = 'auto';
   }
   for (const c of node.children) {
     assignSectionPurpose(c, depth + 1);
@@ -526,8 +612,18 @@ const WARNING_SAMPLE_CAP = 25;
 
 const GENERIC_NAME_RX = /^(Frame|Group|Rectangle|Ellipse|Vector|Component|Instance|Path) ?\d*$/i;
 
-export function buildValidationReport(trees: ExtractedNode[]): ValidationReport {
+export function buildValidationReport(
+  trees: ExtractedNode[],
+  tokens?: DesignTokens,
+): ValidationReport {
   const raw: ValidationWarning[] = [];
+
+  // Token-level warnings (brand color naming hygiene). Emitted first so
+  // they land at the top of the report — the user can act on these
+  // *before* re-running the extract.
+  if (tokens) {
+    for (const w of brandColorHygieneWarnings(tokens)) raw.push(w);
+  }
 
   function walk(n: ExtractedNode) {
     // unnamed layers

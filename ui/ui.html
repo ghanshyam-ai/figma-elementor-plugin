@@ -86,14 +86,128 @@
         font-family: ui-monospace, SFMono-Regular, monospace;
         font-size: 11px;
         line-height: 1.5;
-        min-height: 120px;
-        max-height: 220px;
+        min-height: 100px;
+        max-height: 180px;
       }
       .log .line { white-space: pre-wrap; }
       .log .info { color: var(--fg); }
       .log .warn { color: var(--warn); }
       .log .error { color: var(--danger); }
       footer { padding: 10px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; }
+
+      details.panel {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+      }
+      details.panel > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 8px 10px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      details.panel > summary::-webkit-details-marker { display: none; }
+      details.panel > summary .badge {
+        background: var(--border);
+        color: var(--fg);
+        border-radius: 10px;
+        font-size: 10px;
+        padding: 2px 8px;
+        font-weight: 500;
+      }
+      details.panel > summary .badge.warn { background: var(--warn); color: #fff; }
+      details.panel > .body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+
+      .field { display: flex; flex-direction: column; gap: 4px; }
+      .field label { color: var(--muted); font-size: 11px; }
+      .field select {
+        appearance: none;
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 12px;
+        font-family: inherit;
+      }
+      .field select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+      .tagged-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        max-height: 140px;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+      }
+      .tagged-list li {
+        padding: 6px 8px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        border-bottom: 1px solid var(--border);
+      }
+      .tagged-list li:last-child { border-bottom: none; }
+      .tagged-list .name { font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tagged-list .tag {
+        background: var(--border);
+        border-radius: 10px;
+        padding: 1px 6px;
+        font-size: 10px;
+        color: var(--fg);
+      }
+      .tagged-list .empty { color: var(--muted); text-align: center; padding: 12px; }
+
+      .warnings-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        max-height: 140px;
+        overflow: auto;
+      }
+      .warnings-list li {
+        padding: 6px 4px;
+        border-bottom: 1px dashed var(--border);
+        color: var(--fg);
+        font-size: 11px;
+      }
+      .warnings-list li:last-child { border-bottom: none; }
+      .warnings-list li.warn { color: var(--warn); }
+      .warnings-list li.error { color: var(--danger); }
+      .warnings-list .code { color: var(--muted); font-family: ui-monospace, monospace; font-size: 10px; }
+
+      .hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
+
+      .suggest-pill {
+        display: inline-block;
+        margin-left: 6px;
+        font-size: 10px;
+        font-weight: 400;
+        background: var(--bg);
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1px 6px;
+        cursor: pointer;
+      }
+      .suggest-pill:hover { background: var(--surface); color: var(--fg); }
+      .suggest-pill::before { content: 'auto: '; opacity: 0.7; }
+
+      .suggestion-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+      .suggestion-list li { padding: 6px 8px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
+      .suggestion-list li:last-child { border-bottom: none; }
+      .suggestion-list .check { flex: 0; }
+      .suggestion-list .name { font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .suggestion-list .tag { background: var(--border); border-radius: 10px; padding: 1px 6px; font-size: 10px; color: var(--fg); }
+      .suggestion-list .empty { color: var(--muted); text-align: center; padding: 12px; }
+      .suggestion-list .conf { color: var(--muted); font-size: 10px; }
     </style>
   </head>
   <body>
@@ -107,20 +221,81 @@
         <span class="value" id="selection">–</span>
         <button id="reselect" style="flex:0; padding:4px 8px;">Refresh</button>
       </div>
+
+      <details class="panel" id="tag-panel">
+        <summary>
+          <span>Tag widgets &amp; sections</span>
+          <span class="badge" id="tagged-count">0</span>
+        </summary>
+        <div class="body">
+          <p class="hint">Select one or more nodes in Figma, then pick a widget or section purpose below. Overrides are saved on the node and survive across plugin runs.</p>
+          <div class="field">
+            <label for="tag-widget">
+              Widget hint (overrides auto-detection)
+              <span class="suggest-pill" id="suggest-widget" hidden></span>
+            </label>
+            <select id="tag-widget" disabled>
+              <!-- Options injected at runtime from src/catalog.ts -->
+              <option value="">— No override —</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="tag-purpose">
+              Section purpose
+              <span class="suggest-pill" id="suggest-purpose" hidden></span>
+            </label>
+            <select id="tag-purpose" disabled>
+              <!-- Options injected at runtime from src/catalog.ts -->
+              <option value="">— No override —</option>
+            </select>
+          </div>
+          <div class="row">
+            <button id="suggest-tags" style="flex:1">Suggest tags</button>
+            <button id="clear-tags" style="flex:1">Clear all tags</button>
+          </div>
+          <div class="field">
+            <label>Currently tagged on this page</label>
+            <ul class="tagged-list" id="tagged-list"><li class="empty">No tagged nodes yet.</li></ul>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel" id="suggestions-panel" hidden>
+        <summary>
+          <span>Auto-tag suggestions</span>
+          <span class="badge" id="suggestion-count">0</span>
+        </summary>
+        <div class="body">
+          <p class="hint">Review proposed widget tags for nodes that have no manual override. Uncheck rows you want to skip, then apply.</p>
+          <ul class="suggestion-list" id="suggestions-list"></ul>
+          <div class="row">
+            <button id="apply-suggestions" class="primary" style="flex:1">Apply selected</button>
+            <button id="dismiss-suggestions" style="flex:1">Dismiss</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel" id="warnings-panel" hidden>
+        <summary>
+          <span>Validation warnings</span>
+          <span class="badge warn" id="warning-count">0</span>
+        </summary>
+        <div class="body">
+          <ul class="warnings-list" id="warnings-list"></ul>
+          <button id="preflight" style="flex:1">Re-run preflight check</button>
+        </div>
+      </details>
+
       <div class="row">
         <button id="extract" class="primary">Extract design</button>
         <button id="download" disabled>Download ZIP</button>
       </div>
-      <label class="opts" style="display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px;">
-        <input type="checkbox" id="include-raw" />
-        <span>Include <code>raw.json</code> (full Figma tree — 5–10× larger ZIP)</span>
-      </label>
       <div class="progress"><div id="bar"></div></div>
       <div class="stats" id="stats">No extraction yet.</div>
       <div class="log" id="log"></div>
     </main>
     <footer>
-      <span>v0.1.0</span>
+      <span>v0.2.0</span>
       <a href="#" id="close">Close</a>
     </footer>
     <!--SCRIPT-->

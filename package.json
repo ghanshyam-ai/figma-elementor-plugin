@@ -6,7 +6,8 @@
   "scripts": {
     "build": "node build.mjs",
     "watch": "node build.mjs --watch",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "node build-tests.mjs && node --test dist/tests/*.cjs"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.100.0",

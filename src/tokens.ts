@@ -6,6 +6,7 @@ import type {
   Fill,
   FigmaStyleToken,
   FigmaVariableToken,
+  ValidationWarning,
 } from './types';
 
 // Walk an extracted tree and aggregate global design tokens.
@@ -31,11 +32,27 @@ export async function buildTokens(roots: ExtractedNode[]): Promise<DesignTokens>
   }
 
   const colors = rankColors(colorCounts, colorContexts);
-  // Drop entries with no fontFamily — Figma sometimes reports a mixed-font
-  // text node with the family field unset, which downstream consumers can't
-  // act on. They live in the raw extraction either way.
+  // Typography: emit every distinct (family, weight, size) bucket. Where
+  // Figma reports a mixed-font text node with no family, fall back to the
+  // dominant family observed *at that size bucket* — headings often use a
+  // different family from body, so a single global dominant would mis-label
+  // a missing-family heading row. Falls through to the global dominant
+  // when no other entry at that size has a known family.
+  const dominantFamily = pickDominantFamily(typoMap);
+  const familyBySizeBucket = pickFamilyBySizeBucket(typoMap);
   const typography = Array.from(typoMap.values())
-    .filter((t) => !!t.fontFamily)
+    .map((t) => {
+      if (!t.fontFamily) {
+        const sizeKey = sizeBucketKey(t.fontSize);
+        const family = (sizeKey ? familyBySizeBucket.get(sizeKey) : undefined) ?? dominantFamily;
+        if (family) {
+          const augmented = t as DesignTokens['typography'][number] & { fontFamilyFallback?: boolean };
+          augmented.fontFamily = family;
+          augmented.fontFamilyFallback = true;
+        }
+      }
+      return t;
+    })
     .sort((a, b) => (b.fontSize ?? 0) - (a.fontSize ?? 0));
   const spacing = bucketSpacing(Array.from(spacingSet));
   const radii = bucketRadii(Array.from(radiiSet));
@@ -103,6 +120,18 @@ export async function buildTokens(roots: ExtractedNode[]): Promise<DesignTokens>
     semantic['radius.sm'] = radii[0];
     if (radii.length >= 2) semantic['radius.md'] = radii[Math.floor(radii.length / 2)];
     semantic['radius.lg'] = radii[radii.length - 1];
+  }
+  // Spacing semantics. `spacing` is the deduplicated ascending list of
+  // numeric values we saw across itemSpacing + padding in the file; this
+  // semantic block makes the ordering contract explicit so consumers don't
+  // have to guess which index means "widget gap" vs "section padding".
+  //   widget_gap     – smallest non-zero spacing (typical inter-widget gap)
+  //   section_gap    – median value (inter-section padding inside auto layouts)
+  //   section_padding – largest value (outer hero/section padding)
+  if (spacing.length) {
+    semantic['spacing.widget_gap'] = spacing[0];
+    semantic['spacing.section_gap'] = spacing[Math.floor(spacing.length / 2)];
+    semantic['spacing.section_padding'] = spacing[spacing.length - 1];
   }
   for (const s of styles) {
     if (s.type === 'PAINT' && typeof s.value === 'string') semantic[s.key] = s.value;
@@ -446,6 +475,69 @@ function luminance(hex: string): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+// Most-frequently-seen fontFamily across all collected typography buckets.
+// Used as a final-fallback when a text node had `figma.mixed` font (so
+// fontFamily arrived as null) and the per-size bucket also had no known
+// family — emitting the entry anyway means downstream agents see every
+// text style, with a sensible family they can override later.
+function pickDominantFamily(
+  typoMap: Map<string, DesignTokens['typography'][number]>,
+): string | null {
+  const counts = new Map<string, number>();
+  for (const t of typoMap.values()) {
+    if (!t.fontFamily) continue;
+    counts.set(t.fontFamily, (counts.get(t.fontFamily) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let bestCount = -1;
+  counts.forEach((count, family) => {
+    if (count > bestCount) {
+      best = family;
+      bestCount = count;
+    }
+  });
+  return best;
+}
+
+// Buckets the size axis into broad bands ('display', 'heading', 'body',
+// 'caption') so missing-family entries fall back to the dominant family
+// in their own band. Heading-band missing entries no longer inherit the
+// body family.
+function sizeBucketKey(size: number | null | undefined): string | null {
+  if (!size || size <= 0) return null;
+  if (size >= 32) return 'display';
+  if (size >= 20) return 'heading';
+  if (size >= 14) return 'body';
+  return 'caption';
+}
+
+function pickFamilyBySizeBucket(
+  typoMap: Map<string, DesignTokens['typography'][number]>,
+): Map<string, string> {
+  const counts = new Map<string, Map<string, number>>();
+  for (const t of typoMap.values()) {
+    if (!t.fontFamily) continue;
+    const key = sizeBucketKey(t.fontSize);
+    if (!key) continue;
+    let inner = counts.get(key);
+    if (!inner) { inner = new Map(); counts.set(key, inner); }
+    inner.set(t.fontFamily, (inner.get(t.fontFamily) ?? 0) + 1);
+  }
+  const out = new Map<string, string>();
+  counts.forEach((inner, bucket) => {
+    let best: string | null = null;
+    let bestCount = -1;
+    inner.forEach((count, family) => {
+      if (count > bestCount) {
+        best = family;
+        bestCount = count;
+      }
+    });
+    if (best) out.set(bucket, best);
+  });
+  return out;
+}
+
 function typoName(size: number, weight: number | null): string {
   if (size >= 48) return 'display';
   if (size >= 32) return 'h1';
@@ -687,6 +779,52 @@ function effectsToStructured(effects: unknown): {
     }
   }
   return out!.length > 0 ? out : undefined;
+}
+
+// Lightweight preflight that only fetches paint styles + builds a minimal
+// DesignTokens shell. Used by the UI's "Preflight check" button so we can
+// surface the brand-color hygiene warning in seconds without walking the
+// full Figma tree or exporting any assets.
+export async function readPaintStylesOnly(): Promise<DesignTokens> {
+  const styles = await readLocalStyles().catch(() => [] as FigmaStyleToken[]);
+  return {
+    colors: [],
+    typography: [],
+    spacing: [],
+    radii: [],
+    styles: styles.length ? styles : undefined,
+  };
+}
+
+// --- Brand-color hygiene -----------------------------------------------
+
+// Names that signal brand intent in a Figma paint style. We accept the
+// usual marketing labels designers reach for; the goal is to catch files
+// where every color is named "Color 1" / "Stroke 4" so the downstream
+// agent doesn't have to guess which hex is the brand primary.
+const BRAND_INTENT_NAME_RX = /\b(primary|brand|accent|cta|action|hero|highlight|on-?primary|on-?brand)\b/i;
+
+// Returns the validation warnings derived from token state. Surfaces a
+// fix-this-before-exporting warning when fewer than two paint styles in
+// the file carry a brand-intent name — the agent's preflight does this
+// downstream too, but catching it inside Figma is the right place.
+export function brandColorHygieneWarnings(tokens: DesignTokens): ValidationWarning[] {
+  const out: ValidationWarning[] = [];
+  const paintStyles = (tokens.styles ?? []).filter((s) => s.type === 'PAINT');
+  // Files without any paint styles are out of scope — those will already
+  // get an unnamed-layer / no-styles signal somewhere else.
+  if (paintStyles.length === 0) return out;
+  const brandLike = paintStyles.filter((s) => BRAND_INTENT_NAME_RX.test(s.name));
+  if (brandLike.length >= 2) return out;
+  out.push({
+    level: 'warn',
+    code: 'unnamed-brand-colors',
+    message:
+      `Only ${brandLike.length} of ${paintStyles.length} paint style(s) carry a brand-intent name ` +
+      `(Primary, Brand, Accent, ...). Rename your main paint styles before exporting so the ` +
+      `downstream agent maps brand color tokens correctly.`,
+  });
+  return out;
 }
 
 function sameTextStyle(

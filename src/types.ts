@@ -168,9 +168,13 @@ export type ResponsiveHints = {
 };
 
 // Granular page-section intent — used by downstream AI to pick widgets.
+// `header` is an alias for nav-bearing top bars (some teams use that label).
+// `trust-row` is a row of trust badges / brand logos / "as seen in" strips —
+// narrower than the umbrella `social-proof` purpose.
 export type SectionPurpose =
   | 'hero'
   | 'navbar'
+  | 'header'
   | 'footer'
   | 'cta'
   | 'lead-capture'
@@ -179,6 +183,8 @@ export type SectionPurpose =
   | 'blog-grid'
   | 'social-proof'
   | 'trust'
+  | 'trust-row'
+  | 'stats'
   | 'faq'
   | 'pricing'
   | 'testimonial'
@@ -301,6 +307,49 @@ export type IconHint = {
   pathCount: number;
 };
 
+// Parsed numeric-heading shape for stats sections, so downstream code does
+// not have to regex "500+", "75.5K+", "$1.2M", "4.8/5", "98%" itself.
+//   raw    – the exact characters as authored ("75.5K+")
+//   value  – the numeric portion as a plain number (75.5)
+//   prefix – any non-numeric prefix ("$" in "$1.2M")
+//   suffix – any non-numeric suffix ("K+", "/5", "%", "+")
+//   label  – the sibling caption text that describes what's being counted
+export type CounterHint = {
+  raw: string;
+  value: number;
+  prefix?: string;
+  suffix?: string;
+  label?: string;
+};
+
+// Per-node widget intent override. When the developer tags a node in Figma
+// via the plugin's "Tag widget" UI, we stash the chosen widget here so the
+// agent treats it as authoritative (overrides our heuristic preferredWidget).
+export type WidgetHint =
+  | 'counter'
+  | 'tabs'
+  | 'accordion'
+  | 'image-carousel'
+  | 'testimonial-carousel'
+  | 'slides'
+  | 'icon-list'
+  | 'icon-box'
+  | 'price-table'
+  | 'price-list'
+  | 'progress'
+  | 'star-rating'
+  | 'social-icons'
+  | 'nav-menu'
+  | 'form'
+  | 'posts'
+  | 'video'
+  | 'image-box'
+  | 'button'
+  | 'image'
+  | 'heading'
+  | 'text-editor'
+  | 'icon';
+
 export type ExtractedNode = {
   id: string;
   name: string;
@@ -352,8 +401,22 @@ export type ExtractedNode = {
   // Suggested Elementor widget for this node (advisory; the mapper may pick
   // something narrower from its emitted-widget set).
   preferredWidget?: PreferredWidget;
+  // Authoritative widget hint — either set by the developer via the plugin's
+  // "Tag widget" UI (stored on the Figma node via pluginData), or stamped by
+  // the structural detectors (counter, logo-strip, icon-list). When present
+  // this should override `preferredWidget` in the downstream agent's
+  // selection logic.
+  widgetHint?: WidgetHint;
+  // For widgetHint='counter' nodes only — parsed numeric value + label.
+  counterHint?: CounterHint;
+  // Source of widgetHint: 'user' = developer-tagged via plugin UI;
+  // 'auto' = stamped by structural detection. Lets downstream tooling decide
+  // which signals to trust (user > auto).
+  widgetHintSource?: 'user' | 'auto';
   // Granular intent for top-level sections (hero, cta, social-proof, etc.).
   sectionPurpose?: SectionPurpose;
+  // Source of sectionPurpose, same semantics as widgetHintSource.
+  sectionPurposeSource?: 'user' | 'auto';
   // Canonical layout pattern (e.g. "3-column-grid", "masonry").
   layoutPattern?: LayoutPattern;
   // Component reuse signals
@@ -475,6 +538,10 @@ export type DesignTokens = {
     lineHeight: number | string | null;
     letterSpacing: number | null;
     styleId?: string;
+    // True when fontFamily was filled from the file's dominant family
+    // because Figma reported `mixed`/null. Agents should treat the family
+    // as a best guess rather than authoritative.
+    fontFamilyFallback?: boolean;
   }[];
   spacing: number[];
   radii: number[];
@@ -550,6 +617,11 @@ export type AISection = {
   isDecorative?: boolean;
   // Suggested Elementor widget for this node
   preferredWidget?: PreferredWidget;
+  // Authoritative widget hint — see ExtractedNode for semantics.
+  widgetHint?: WidgetHint;
+  counterHint?: CounterHint;
+  widgetHintSource?: 'user' | 'auto';
+  sectionPurposeSource?: 'user' | 'auto';
   // Component-reuse signals (see ExtractedNode for semantics)
   componentFingerprint?: string;
   instanceGroup?: string;
@@ -647,14 +719,70 @@ export type ElementorTemplate = {
 
 // --- Plugin <-> UI message protocol ---
 
+// Light-weight description of one tagged Figma node, surfaced in the
+// "Tag widget" panel so the developer can see + remove existing overrides
+// at a glance.
+export type TaggedNodeSummary = {
+  id: string;
+  name: string;
+  widgetHint?: WidgetHint;
+  sectionPurpose?: SectionPurpose;
+};
+
+// Auto-detected widget / purpose for a node, shown alongside the override
+// dropdowns so the developer sees what the heuristic *would* pick.
+export type AutoSuggestion = {
+  widget?: WidgetHint;
+  purpose?: SectionPurpose;
+  confidence?: number;
+  reason?: string;
+};
+
+// Selection summary sent to the UI on every selectionchange. The tagging
+// panel uses this to enable/disable the widget dropdown and reflect any
+// existing overrides on the currently-selected node.
+export type SelectionInfo = {
+  label: string;
+  nodeId?: string;
+  nodeName?: string;
+  // Number of nodes selected. The UI now supports multi-select tagging,
+  // so this is preferred over the old isSingle boolean (kept for back-compat).
+  selectionCount: number;
+  isSingle: boolean;
+  hasSelection: boolean;
+  // Existing overrides on the currently-selected node, if any. Set only on
+  // single-node selections — multi-select shows the dropdowns empty since
+  // mixed overrides can't be reflected in one value.
+  widgetHint?: WidgetHint;
+  sectionPurpose?: SectionPurpose;
+  // Heuristic-suggested widget / purpose for the currently-selected node.
+  // Lets the UI show "auto: counter" alongside the override dropdown so
+  // the developer can compare before tagging.
+  autoSuggestion?: AutoSuggestion;
+  // Full list of tagged nodes on the current page, regardless of selection.
+  taggedSummary: TaggedNodeSummary[];
+};
+
+// One row in the auto-tag suggestions panel — the developer reviews these
+// and decides which to apply in bulk.
+export type SuggestionRow = {
+  nodeId: string;
+  nodeName: string;
+  widget?: WidgetHint;
+  purpose?: SectionPurpose;
+  confidence: number;
+  reason: string;
+  // True when this node already has the same tag (so applying is a no-op).
+  alreadyTagged: boolean;
+};
+
 export type PluginToUIMessage =
-  | { type: 'init'; selectionLabel: string }
+  | { type: 'init'; selection: SelectionInfo }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'progress'; phase: string; value: number }
   | {
       type: 'extracted';
       data: ElementorTemplate;
-      raw: ExtractedNode[];
       tokens: DesignTokens;
       metadata: Metadata;
       assets: Asset[];
@@ -662,10 +790,20 @@ export type PluginToUIMessage =
       aiLayout: AILayout;
       assetManifest: AssetManifestEntry[];
       validation: ValidationReport;
+      taggedSummary: TaggedNodeSummary[];
     }
+  | { type: 'preflight-result'; warnings: ValidationWarning[] }
+  | { type: 'suggestions'; rows: SuggestionRow[] }
   | { type: 'error'; message: string };
 
 export type UIToPluginMessage =
   | { type: 'extract' }
   | { type: 'reselect' }
-  | { type: 'close' };
+  | { type: 'close' }
+  | { type: 'tag-widget'; widget: WidgetHint | null }
+  | { type: 'tag-section-purpose'; purpose: SectionPurpose | null }
+  | { type: 'reveal-node'; nodeId: string }
+  | { type: 'preflight' }
+  | { type: 'suggest-tags' }
+  | { type: 'apply-suggestions'; rows: SuggestionRow[] }
+  | { type: 'clear-all-tags' };

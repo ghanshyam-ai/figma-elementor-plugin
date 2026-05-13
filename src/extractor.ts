@@ -5,6 +5,7 @@ import type {
   BreakpointHints,
   ComputedStyle,
   ConstraintAxis,
+  CounterHint,
   Effect,
   ExtractedNode,
   Fill,
@@ -17,12 +18,22 @@ import type {
   Padding,
   PreferredWidget,
   ResponsiveHints,
+  SectionPurpose,
   SemanticRole,
   StateStyle,
   Stroke,
   TextRun,
   TextStyle,
+  WidgetHint,
 } from './types';
+
+import { SECTION_PURPOSE_VALUES, WIDGET_HINT_VALUES } from './catalog';
+
+// Plugin-data keys used to persist developer-authored tagging overrides on
+// Figma nodes. These survive across plugin runs and file reopens because
+// they live on the node itself in Figma's document.
+export const PLUGIN_DATA_KEY_WIDGET = 'elementor-widget';
+export const PLUGIN_DATA_KEY_PURPOSE = 'elementor-section-purpose';
 
 // --- Color helpers -------------------------------------------------------
 
@@ -938,6 +949,178 @@ function preferredWidgetFor(
   }
 }
 
+// Promote a generic 'container' preferredWidget to a real leaf widget when
+// the node *looks* like a single-widget wrapper. The agent's classifier
+// otherwise has to re-derive intent from the node tree because every plain
+// frame defaults to 'container'.
+//
+// Trigger conditions (require ≥0.7 confidence per the spec):
+//  - exactly one meaningful descendant + that descendant is a leaf widget
+//  - direct image-fill on a node with no children → 'image'
+//  - heading-sized text-only frame → 'heading'
+//  - small icon-shaped frame → 'icon'
+export function promoteLeafWidget(node: ExtractedNode): { widget: PreferredWidget; confidence: number } | null {
+  // Already specific — nothing to do.
+  if (node.preferredWidget && node.preferredWidget !== 'container') return null;
+  // Don't touch nodes whose semantic role implies they're truly structural
+  // (hero/footer/navbar/section/form). Those *should* stay container.
+  const r = node.semanticRole;
+  if (r === 'hero' || r === 'footer' || r === 'navbar' || r === 'section' || r === 'form' ||
+      r === 'pricing-card' || r === 'testimonial' || r === 'accordion' || r === 'tabs' ||
+      r === 'slider' || r === 'grid') {
+    return null;
+  }
+
+  // Direct image fill, no children → image widget.
+  if (node.fills.some((f) => f.type === 'IMAGE') && node.children.length === 0) {
+    return { widget: 'image', confidence: 0.9 };
+  }
+
+  // Walk meaningful descendants (skip decorative shapes, background shapes).
+  const meaningful = collectMeaningfulDescendants(node, /*max*/ 4);
+  if (meaningful.length === 0) return null;
+
+  if (meaningful.length === 1) {
+    const m = meaningful[0];
+    const w = leafWidgetFor(m);
+    if (w) return { widget: w, confidence: 0.8 };
+  }
+
+  // Single button + no other interactive content → button (button frames
+  // are sometimes nested in a wrapper container).
+  const buttons = meaningful.filter((m) => m.semanticRole === 'button');
+  if (buttons.length === 1 && meaningful.length <= 2) {
+    return { widget: 'button', confidence: 0.75 };
+  }
+
+  // Single icon + no text — icon-box doesn't apply (icon-box needs a
+  // headline). Plain icon is the better widget choice.
+  const icons = meaningful.filter((m) => m.semanticRole === 'icon');
+  const texts = meaningful.filter((m) => m.semanticRole === 'text');
+  if (icons.length === 1 && texts.length === 0 && meaningful.length === 1) {
+    return { widget: 'icon', confidence: 0.75 };
+  }
+
+  // Icon + heading-sized text → icon-box.
+  if (icons.length === 1 && texts.length >= 1 && texts.length <= 2) {
+    const headingLike = texts.some((t) => t.text && (t.text.fontSize ?? 0) >= 16);
+    if (headingLike) return { widget: 'icon-box', confidence: 0.7 };
+  }
+
+  return null;
+}
+
+// Treat decorative shapes / background-shapes / hidden nodes as ignorable.
+// Cap the result so we exit early on deep trees — the leaf-promotion logic
+// only cares about ~1–4 meaningful descendants, anything beyond that is a
+// real container.
+function collectMeaningfulDescendants(
+  node: ExtractedNode,
+  cap: number,
+): ExtractedNode[] {
+  const out: ExtractedNode[] = [];
+  function walkLocal(n: ExtractedNode) {
+    if (out.length > cap) return;
+    for (const c of n.children) {
+      if (out.length > cap) return;
+      if (c.visible === false) continue;
+      if (c.isDecorative) continue;
+      const role = c.semanticRole;
+      if (role === 'background-shape' || role === 'shape') continue;
+      if (role === 'text' || role === 'image' || role === 'icon' || role === 'logo' ||
+          role === 'button' || role === 'input') {
+        out.push(c);
+        continue; // leaf — do not recurse into a leaf widget
+      }
+      walkLocal(c);
+    }
+  }
+  walkLocal(node);
+  return out;
+}
+
+function leafWidgetFor(n: ExtractedNode): PreferredWidget | undefined {
+  // A stamped widget hint (counter, etc.) is authoritative — the wrapper
+  // around a counter heading should also be tagged as counter so a
+  // single-child container doesn't dilute the intent at the layout level.
+  if (n.widgetHint && n.widgetHint !== 'text-editor' && n.widgetHint !== 'heading') {
+    return n.widgetHint as PreferredWidget;
+  }
+  const role = n.semanticRole;
+  if (role === 'text') {
+    return isHeadingText(n.text) ? 'heading' : 'text-editor';
+  }
+  if (role === 'image') return 'image';
+  if (role === 'icon') return 'icon';
+  if (role === 'logo') return 'image';
+  if (role === 'button') return 'button';
+  if (role === 'input') return 'form';
+  return undefined;
+}
+
+// --- Developer-authored overrides (pluginData) -------------------------
+
+function readPluginDataSafe(node: SceneNode, key: string): string {
+  try {
+    if (typeof (node as { getPluginData?: (k: string) => string }).getPluginData !== 'function') return '';
+    return (node as unknown as { getPluginData: (k: string) => string }).getPluginData(key) || '';
+  } catch {
+    return '';
+  }
+}
+
+function applyPluginDataOverrides(source: SceneNode, target: ExtractedNode): void {
+  const w = readPluginDataSafe(source, PLUGIN_DATA_KEY_WIDGET);
+  if (w && WIDGET_HINT_VALUES.has(w)) {
+    target.widgetHint = w as WidgetHint;
+    target.widgetHintSource = 'user';
+    // The widget hint also acts as a preferredWidget override when the hint
+    // overlaps the preferredWidget vocabulary, so the agent doesn't have to
+    // know to consult widgetHint first.
+    target.preferredWidget = w as PreferredWidget;
+  }
+  const p = readPluginDataSafe(source, PLUGIN_DATA_KEY_PURPOSE);
+  if (p && SECTION_PURPOSE_VALUES.has(p)) {
+    target.sectionPurpose = p as SectionPurpose;
+    target.sectionPurposeSource = 'user';
+  }
+}
+
+// --- Counter detection --------------------------------------------------
+
+// Match common stats-section numeric headings. Examples it accepts:
+//   "500+", "75.5K+", "$1.2M", "98%", "4.8/5", "10,000", "1,234,567"
+// Anchored to start/end so a number embedded in a sentence ("we have 500+
+// users now") is not mistaken for a counter source value.
+const COUNTER_RX = /^\s*([^\d.,\s-]?)\s*(-?\d{1,3}(?:[,\s]\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?)\s*([A-Za-z%+]+|\/\d+(?:\.\d+)?)?\s*$/;
+
+export function parseCounter(raw: string): CounterHint | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed.length > 24) return null;
+  const m = trimmed.match(COUNTER_RX);
+  if (!m) return null;
+  const prefix = m[1] || undefined;
+  const numRaw = m[2].replace(/[,\s]/g, '');
+  const value = Number(numRaw);
+  if (!isFinite(value)) return null;
+  const suffix = m[3] || undefined;
+  const out: CounterHint = { raw: trimmed, value };
+  if (prefix) out.prefix = prefix;
+  if (suffix) out.suffix = suffix;
+  return out;
+}
+
+// True when the text content + size profile match a stats counter — short,
+// heading-sized, parseable as a number-with-unit. Sub-16pt body copy that
+// happens to be a number ("Buy 2 get 1 free") is rejected.
+function looksLikeCounterText(node: ExtractedNode): CounterHint | null {
+  if (!node.text || !node.text.characters) return null;
+  const size = node.text.fontSize ?? 0;
+  if (size < 20) return null;
+  return parseCounter(node.text.characters);
+}
+
 // --- Decorative + importance --------------------------------------------
 
 function detectDecorative(
@@ -1057,6 +1240,29 @@ function refineSemanticAndWidget(node: ExtractedNode): void {
     }
   }
 
+  // Logo strip: a horizontal row whose children are 3+ similar-height
+  // image/icon-shaped nodes with no accompanying text. Stamp each child as
+  // a 'logo' asset and tag the parent with the social-proof purpose so the
+  // agent doesn't have to re-derive intent from geometry.
+  if (looksLikeLogoStrip(node)) {
+    node.preferredWidget = 'image-carousel'; // hints at multi-image strip layout
+    node.sectionPurpose = 'trust-row';
+    node.sectionPurposeSource = 'auto';
+    for (const c of node.children) {
+      if (c.visible === false) continue;
+      // Only re-tag children that look image-shaped (don't clobber text labels).
+      if (c.semanticRole === 'image' || c.semanticRole === 'icon' || c.semanticRole === 'logo' ||
+          c.semanticRole === 'shape' || c.semanticRole === 'background-shape') {
+        c.semanticRole = 'logo';
+        c.role = 'image';
+        c.assetType = 'logo';
+        c.preferredWidget = 'image';
+        c.confidence = Math.max(c.confidence ?? 0, 0.75);
+        c.roleReason = 'logo-strip child (similar-height image in a horizontal row of images)';
+      }
+    }
+  }
+
   // Icon list: vertical/horizontal stack of (icon + text) rows. Promote
   // preferredWidget without changing the semantic role — there's no
   // 'icon-list' semantic role and the role 'container' is still accurate.
@@ -1067,6 +1273,151 @@ function refineSemanticAndWidget(node: ExtractedNode): void {
       node.preferredWidget = 'icon-list';
     }
   }
+
+  // Counter detection. Runs on the parent of the numeric heading so we can
+  // pair the number with its sibling caption — the value lives on the
+  // numeric text node, but the label only exists on a sibling text node.
+  detectAndStampCounters(node);
+
+  // Final leaf-widget promotion. Has to run after the structural detectors
+  // above so we don't trample accordion/iconlist promotions, but before the
+  // export sees a generic 'container' on what's really a single image.
+  const promoted = promoteLeafWidget(node);
+  if (promoted) {
+    node.preferredWidget = promoted.widget;
+    if (node.confidence === undefined || node.confidence < promoted.confidence) {
+      node.confidence = promoted.confidence;
+    }
+  }
+}
+
+// Tag a heading-sized numeric text node with widgetHint='counter' and stash
+// the parsed value + optional label (sibling caption text). Operates on the
+// numeric text node, not the wrapper — Elementor's counter widget is a
+// single field, not a container.
+function detectAndStampCounters(parent: ExtractedNode): void {
+  const items = parent.children;
+  for (let i = 0; i < items.length; i += 1) {
+    const cur = items[i];
+    const counter = looksLikeCounterText(cur);
+    if (!counter) continue;
+    // Skip if a developer already tagged this node (preserve user intent).
+    if (cur.widgetHintSource === 'user') continue;
+    const label = findCounterLabel(parent, cur);
+    if (label) counter.label = label;
+    cur.widgetHint = 'counter';
+    cur.widgetHintSource = 'auto';
+    cur.counterHint = counter;
+    // Counter widgets are leaves — make sure preferredWidget agrees.
+    cur.preferredWidget = 'counter';
+  }
+}
+
+// Find the caption text for a numeric heading. The label often isn't a
+// direct sibling: stats cards typically nest the number and label in a
+// single column, the number in its own row, and the label below. So we
+// walk every text descendant of the parent and pick the shortest non-
+// counter text within a configurable character cap.
+//
+// Strategy:
+//  1. Prefer an immediate sibling text node directly after the number
+//     (the most common layout — "1,200" / "Customers" stacked).
+//  2. Fall back to the shortest non-numeric text descendant of the parent.
+//  3. Cap the considered text at 80 characters so a paragraph doesn't get
+//     misread as a counter label.
+function findCounterLabel(parent: ExtractedNode, counterNode: ExtractedNode): string | undefined {
+  const siblings = parent.children;
+  const idx = siblings.indexOf(counterNode);
+  // 1) immediate following sibling (most common stacked layout)
+  if (idx >= 0) {
+    const after = siblings[idx + 1];
+    const before = siblings[idx - 1];
+    for (const sib of [after, before]) {
+      if (!sib) continue;
+      const direct = directText(sib);
+      if (direct && isAcceptableLabel(direct)) return direct;
+    }
+  }
+  // 2) walk parent's text descendants and pick the best label candidate.
+  const candidates: { text: string; size: number }[] = [];
+  function walk(n: ExtractedNode) {
+    if (n === counterNode) return; // skip the counter text itself
+    if (n.text && n.text.characters) {
+      const s = n.text.characters.trim();
+      if (s && isAcceptableLabel(s)) {
+        candidates.push({ text: s, size: n.text.fontSize ?? 0 });
+      }
+    }
+    for (const c of n.children) walk(c);
+  }
+  for (const c of parent.children) walk(c);
+  if (candidates.length === 0) return undefined;
+  // Prefer the smaller-font (label-like) candidate; tiebreak by shortest
+  // text so we don't fold in a marketing tagline.
+  candidates.sort((a, b) => a.size - b.size || a.text.length - b.text.length);
+  return candidates[0].text;
+}
+
+function directText(node: ExtractedNode): string | undefined {
+  if (node.text && node.text.characters) return node.text.characters.trim();
+  // Walk one level — many designers wrap the label in an auto-layout
+  // container that contains a single text child.
+  for (const c of node.children) {
+    if (c.text && c.text.characters) return c.text.characters.trim();
+  }
+  return undefined;
+}
+
+function isAcceptableLabel(s: string): boolean {
+  if (!s) return false;
+  if (s.length > 80) return false;
+  // Skip numeric-shaped strings — those are likely other counters, not labels.
+  if (parseCounter(s)) return false;
+  return true;
+}
+
+// A horizontal row of similar-height image-like children with no text-heavy
+// content next to them. Strict thresholds intentionally — false positives
+// on a feature-grid would wreck downstream classification.
+export function looksLikeLogoStrip(node: ExtractedNode): boolean {
+  const isRow = node.layout.mode === 'HORIZONTAL' ||
+    (node.inferredLayout && node.inferredLayout.mode === 'HORIZONTAL');
+  if (!isRow) return false;
+  const visible = node.children.filter((c) => c.visible !== false && !c.isDecorative);
+  if (visible.length < 3) return false;
+  let imageLike = 0;
+  let textBearing = 0;
+  let maxH = 0;
+  let minH = Infinity;
+  for (const c of visible) {
+    const role = c.semanticRole;
+    const hasImageFill = c.fills.some((f) => f.type === 'IMAGE');
+    const looksImage = role === 'image' || role === 'icon' || role === 'logo' || hasImageFill;
+    const looksContainerWithImage =
+      (role === 'container' || role === 'card' || role === 'shape') &&
+      c.children.length <= 2 &&
+      (hasImageFill ||
+        c.children.some((g) => g.semanticRole === 'image' || g.semanticRole === 'icon' || g.semanticRole === 'logo'));
+    if (looksImage || looksContainerWithImage) {
+      imageLike += 1;
+      if (c.height > maxH) maxH = c.height;
+      if (c.height < minH) minH = c.height;
+      continue;
+    }
+    if (c.semanticRole === 'text' || c.role === 'text') {
+      textBearing += 1;
+      continue;
+    }
+    // Anything else — bail. Logo strips are pure rows of images.
+    return false;
+  }
+  if (imageLike < 3) return false;
+  if (textBearing > 0) return false;
+  // Similar heights — logos vary in width but always share a baseline.
+  if (minH <= 0 || maxH / minH > 1.6) return false;
+  // No child should be giant; logo strips top out at ~120px tall.
+  if (maxH > 160) return false;
+  return true;
 }
 
 function looksLikeAccordion(node: ExtractedNode): boolean {
@@ -1631,6 +1982,14 @@ async function walk(
   const hasImageFill = fills.some((f) => f.type === 'IMAGE');
   const widget = preferredWidgetFor(finalRole, headingFlag, hasImageFill, result.children.length);
   if (widget) result.preferredWidget = widget;
+
+  // --- Developer-authored overrides (pluginData) ------------------------
+  // Read user-applied widget / section-purpose tags from the Figma node.
+  // These take precedence over our heuristics — the developer knows their
+  // own design better than any pattern detector ever will. We stamp the
+  // override here (before refine) and mark widgetHintSource='user' so the
+  // refine pass leaves it alone.
+  applyPluginDataOverrides(node, result);
 
   // --- Auto-layout inference (must precede pattern + refine, both read it)
   const inferred = inferAutoLayout(result);
