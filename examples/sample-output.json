@@ -9,11 +9,16 @@
       "elType": "container",
       "isInner": false,
       "settings": {
-        "content_width": "full",
+        "background_background": "classic",
+        "background_color": "#0F172A",
+        "content_width": "boxed",
+        "boxed_width": { "unit": "px", "size": 1440, "sizes": [] },
+        "min_height": { "unit": "px", "size": 720, "sizes": [] },
         "flex_direction": "column",
         "flex_gap": { "unit": "px", "size": 32, "sizes": [] },
         "flex_justify_content": "center",
         "flex_align_items": "center",
+        "flex_wrap": "nowrap",
         "padding": {
           "unit": "px",
           "top": "96",
@@ -21,12 +26,7 @@
           "bottom": "96",
           "left": "120",
           "isLinked": false
-        },
-        "background_background": "classic",
-        "background_color": "#0F172A",
-        "min_height": { "unit": "px", "size": 720, "sizes": [] },
-        "_figma_id": "1:23",
-        "_figma_name": "Hero"
+        }
       },
       "elements": [
         {
@@ -42,8 +42,7 @@
             "typography_font_family": "Inter",
             "typography_font_size": { "unit": "px", "size": 56, "sizes": [] },
             "typography_font_weight": 700,
-            "typography_line_height": { "unit": "px", "size": 64, "sizes": [] },
-            "_figma_id": "1:24"
+            "typography_line_height": { "unit": "px", "size": 64, "sizes": [] }
           },
           "elements": []
         },
@@ -58,8 +57,7 @@
             "typography_typography": "custom",
             "typography_font_family": "Inter",
             "typography_font_size": { "unit": "px", "size": 18, "sizes": [] },
-            "typography_font_weight": 400,
-            "_figma_id": "1:25"
+            "typography_font_weight": 400
           },
           "elements": []
         },
@@ -68,10 +66,10 @@
           "elType": "container",
           "isInner": true,
           "settings": {
+            "width": { "unit": "px", "size": 360, "sizes": [] },
             "flex_direction": "row",
             "flex_gap": { "unit": "px", "size": 16, "sizes": [] },
-            "_figma_id": "1:26",
-            "_figma_name": "CTA Group"
+            "flex_wrap": "nowrap"
           },
           "elements": [
             {
@@ -80,14 +78,29 @@
               "widgetType": "button",
               "settings": {
                 "text": "Get started",
+                "link": { "url": "", "is_external": "", "nofollow": "" },
+                "align": "left",
+                "size": "md",
+                "button_type": "",
+                "view": "traditional",
+                "typography_typography": "custom",
+                "typography_font_family": "Inter",
+                "typography_font_size": { "unit": "px", "size": 16, "sizes": [] },
+                "typography_font_weight": 600,
                 "background_color": "#22D3EE",
+                "button_text_color": "#0F172A",
+                "hover_color": "#0F172A",
+                "button_background_hover_color": "#22D3EE",
                 "border_radius": {
                   "unit": "px",
                   "top": "8", "right": "8", "bottom": "8", "left": "8",
                   "isLinked": true
                 },
-                "_figma_id": "1:27",
-                "_figma_name": "Primary Button"
+                "text_padding": {
+                  "unit": "px",
+                  "top": "12", "right": "20", "bottom": "12", "left": "20",
+                  "isLinked": false
+                }
               },
               "elements": []
             },
@@ -97,8 +110,11 @@
               "widgetType": "button",
               "settings": {
                 "text": "Watch demo",
-                "_figma_id": "1:28",
-                "_figma_name": "Secondary Button"
+                "link": { "url": "", "is_external": "", "nofollow": "" },
+                "align": "left",
+                "size": "md",
+                "button_type": "",
+                "view": "traditional"
               },
               "elements": []
             }
@@ -109,12 +125,16 @@
           "elType": "widget",
           "widgetType": "image",
           "settings": {
-            "image": { "url": "assets/images/img_1.png", "id": "img_1" },
+            "image": {
+              "url": "assets/images/img_1.png",
+              "id": "",
+              "alt": "Hero Visual",
+              "source": "url"
+            },
             "image_size": "full",
-            "width": { "unit": "px", "size": 960, "sizes": [] },
-            "height": { "unit": "px", "size": 540, "sizes": [] },
-            "_figma_id": "1:29",
-            "_figma_name": "Hero Visual"
+            "_element_width": "initial",
+            "_element_custom_width": { "unit": "px", "size": 960, "sizes": [] },
+            "height": { "unit": "px", "size": 540, "sizes": [] }
           },
           "elements": []
         }

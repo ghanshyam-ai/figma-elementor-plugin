@@ -10,7 +10,9 @@ const codeOptions = {
   entryPoints: ['src/code.ts'],
   bundle: true,
   outfile: 'dist/code.js',
-  target: 'es2020',
+  // Figma's plugin sandbox runs an older JS engine that chokes on nullish
+  // coalescing / optional chaining. Compile them away.
+  target: 'es2016',
   platform: 'browser',
   format: 'iife',
   logLevel: 'info',
@@ -20,6 +22,7 @@ const uiOptions = {
   entryPoints: ['ui/ui.ts'],
   bundle: true,
   outfile: 'dist/ui.js',
+  // UI runs in a Chromium iframe, so modern JS is fine.
   target: 'es2020',
   platform: 'browser',
   format: 'iife',

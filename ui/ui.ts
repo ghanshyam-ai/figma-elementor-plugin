@@ -1,12 +1,15 @@
 import JSZip from 'jszip';
 import type {
+  AILayout,
   Asset,
+  AssetManifestEntry,
   ElementorTemplate,
   ExtractedNode,
   Metadata,
   PluginToUIMessage,
   Screenshot,
   UIToPluginMessage,
+  ValidationReport,
 } from '../src/types';
 
 // State held while we wait for the user to click "Download".
@@ -17,6 +20,9 @@ let lastBundle: {
   metadata: Metadata;
   assets: Asset[];
   screenshots: Screenshot[];
+  aiLayout: AILayout;
+  assetManifest: AssetManifestEntry[];
+  validation: ValidationReport;
 } | null = null;
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -28,6 +34,7 @@ const closeLink = $('close');
 const logEl = $('log');
 const barEl = $('bar');
 const statsEl = $('stats');
+const includeRawEl = $<HTMLInputElement>('include-raw');
 
 extractBtn.addEventListener('click', () => {
   setBusy(true);
@@ -75,9 +82,13 @@ window.addEventListener('message', (event: MessageEvent) => {
         metadata: msg.metadata,
         assets: msg.assets,
         screenshots: msg.screenshots,
+        aiLayout: msg.aiLayout,
+        assetManifest: msg.assetManifest,
+        validation: msg.validation,
       };
       const m = msg.metadata.counts;
-      statsEl.innerHTML = `<strong>${m.nodes}</strong> nodes · <strong>${m.sections}</strong> sections · <strong>${m.widgets}</strong> widgets · <strong>${m.assets}</strong> assets`;
+      const warnCount = msg.validation.warnings.length;
+      statsEl.innerHTML = `<strong>${m.nodes}</strong> nodes · <strong>${m.sections}</strong> sections · <strong>${m.widgets}</strong> widgets · <strong>${m.assets}</strong> assets · <strong>${warnCount}</strong> warnings`;
       downloadBtn.disabled = false;
       setBusy(false);
       appendLog('info', 'Ready to download.');
@@ -118,7 +129,12 @@ async function packageZip(bundle: NonNullable<typeof lastBundle>) {
 
   root.file('data.json', JSON.stringify(bundle.data, null, 2));
   root.file('global.json', JSON.stringify(bundle.tokens, null, 2));
-  root.file('raw.json', JSON.stringify(bundle.raw, null, 2));
+  if (includeRawEl.checked) {
+    root.file('raw.json', JSON.stringify(bundle.raw, null, 2));
+  }
+  root.file('ai-layout.json', JSON.stringify(bundle.aiLayout, null, 2));
+  root.file('assets.json', JSON.stringify(bundle.assetManifest, null, 2));
+  root.file('validation.json', JSON.stringify(bundle.validation, null, 2));
   root.file('metadata.json', JSON.stringify(bundle.metadata, null, 2));
 
   const screenshotsFolder = root.folder('screenshots');
@@ -175,13 +191,20 @@ function readmeText(meta: Metadata): string {
     '',
     `Exported by ${meta.generator} v${meta.version} at ${meta.exportedAt}.`,
     '',
-    '## Layout',
-    '- `data.json` – Elementor template (containers + widgets)',
-    '- `global.json` – design tokens (colors, typography, spacing, radii)',
-    '- `raw.json` – full extracted Figma node tree',
+    '## Files',
+    '- `ai-layout.json` – compact, AI-friendly summary (page type + sections + content roll-ups)',
+    '- `global.json` – design tokens (colors, typography, spacing, radii, Figma styles, variables)',
+    '- `assets.json` – asset manifest with type, format and alt text',
+    '- `validation.json` – warnings (unnamed layers, absolute layout, mixed fonts, large rasters, ...)',
+    '- `data.json` – Elementor template (containers + widgets) — preview/debug',
+    '- `raw.json` – full extracted Figma node tree (only when "Include raw.json" was checked)',
     '- `metadata.json` – source + counts',
     '- `screenshots/` – PNG render of each selected frame',
-    '- `assets/images/` – exported image fills',
+    '- `assets/images/` – exported image fills, icons (SVG when possible) and rasterised graphics',
+    '',
+    '## Recommended consumption',
+    'For AI agents, prefer `ai-layout.json` + `global.json` + `assets.json` + screenshots over the raw tree.',
+    'Use `validation.json` to decide which sections need a manual visual fallback.',
     '',
     '## Counts',
     `- Nodes: ${meta.counts.nodes}`,

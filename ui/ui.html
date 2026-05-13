@@ -111,6 +111,10 @@
         <button id="extract" class="primary">Extract design</button>
         <button id="download" disabled>Download ZIP</button>
       </div>
+      <label class="opts" style="display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px;">
+        <input type="checkbox" id="include-raw" />
+        <span>Include <code>raw.json</code> (full Figma tree — 5–10× larger ZIP)</span>
+      </label>
       <div class="progress"><div id="bar"></div></div>
       <div class="stats" id="stats">No extraction yet.</div>
       <div class="log" id="log"></div>
