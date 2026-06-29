@@ -201,11 +201,19 @@ function collectTexts(node: ExtractedNode): { text: string; size: number | null 
     if (n.text && n.text.characters) {
       out.push({ text: n.text.characters.trim(), size: n.text.fontSize });
     }
-    for (const c of n.children) walk(c);
+    for (const c of n.children) {
+      // Stop at structural children — they are summarised as their own
+      // AISection (with their own content roll-up), so descending into them
+      // here would duplicate the same copy at the parent and merge text
+      // across section boundaries out of order.
+      if (isStructural(c)) continue;
+      walk(c);
+    }
   }
-  // Walk children; don't include the node itself when it is text — we want
-  // the section's own headings, not duplicate node-level text.
-  for (const c of node.children) walk(c);
+  for (const c of node.children) {
+    if (isStructural(c)) continue;
+    walk(c);
+  }
   return out.filter((t) => t.text.length > 0);
 }
 
@@ -218,9 +226,17 @@ function collectButtons(node: ExtractedNode): { text: string; style?: string }[]
       out.push(text ? { text, style } : { text: n.name, style });
       return;
     }
-    for (const c of n.children) walk(c);
+    for (const c of n.children) {
+      // Same boundary rule as collectTexts — buttons owned by a structural
+      // child section are reported there, not duplicated at the parent.
+      if (isStructural(c)) continue;
+      walk(c);
+    }
   }
-  for (const c of node.children) walk(c);
+  for (const c of node.children) {
+    if (isStructural(c)) continue;
+    walk(c);
+  }
   return out;
 }
 
@@ -363,6 +379,11 @@ export function detectSectionPurpose(node: ExtractedNode): SectionPurpose {
   if (PURPOSE_RX.trustRow.test(name) || (counts.logo >= 3 && counts.text === 0 && counts.button === 0)) {
     return 'trust-row';
   }
+  // Pricing first — a pricing table with large price numbers must not be
+  // misread as a stats/counter section. (Counter detection already skips
+  // currency-prefixed amounts, but an explicit pricing name or pricing-card
+  // descendants are the strongest possible signal, so settle it here.)
+  if (counts.pricingCard > 0 || PURPOSE_RX.pricing.test(name)) return 'pricing';
   // Stats / counter section — detected on counter presence in descendants
   // or an explicit "stats / by the numbers" name.
   if (PURPOSE_RX.stats.test(name) || hasCounters(node)) {
@@ -372,7 +393,6 @@ export function detectSectionPurpose(node: ExtractedNode): SectionPurpose {
   if (counts.form > 0 || counts.input >= 2 || PURPOSE_RX.leadCapture.test(name)) {
     return 'lead-capture';
   }
-  if (counts.pricingCard > 0 || PURPOSE_RX.pricing.test(name)) return 'pricing';
   if (counts.testimonial > 0) return 'testimonial';
   if (counts.accordion >= 2 || PURPOSE_RX.faq.test(name)) return 'faq';
   if (PURPOSE_RX.comparison.test(name)) return 'feature-comparison';

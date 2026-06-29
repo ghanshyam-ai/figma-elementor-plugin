@@ -195,13 +195,20 @@ function mapContainer(
   const bgColor = solidColor(node.fills);
   const bgImage = imageBackground(node.fills);
   const gradient = gradientBackground(node.fills);
+  // Border from the frame's stroke (mapShape/mapButton already do this; a
+  // bordered card/section/input frame becomes a container, so it needs the
+  // same treatment or it loses its outline on import).
+  const stroke = node.strokes[0];
   const settings: Record<string, unknown> = {
     background_background: backgroundType(node.fills),
-    background_color: bgColor,
+    background_color: elementorColor(bgColor),
     background_image: bgImage,
     border_radius: borderRadiusSetting(node.cornerRadius),
     box_shadow_box_shadow_type: shadow ? 'yes' : undefined,
     box_shadow_box_shadow: shadow,
+    border_border: stroke ? 'solid' : undefined,
+    border_width: stroke ? uniformPx(stroke.weight) : undefined,
+    border_color: stroke ? elementorColor(stroke.color) : undefined,
   };
   if (gradient) Object.assign(settings, gradient);
   // Background-blur cannot be expressed via Elementor controls. Stamp the
@@ -269,7 +276,7 @@ function mapText(node: ExtractedNode, lookup: TokenLookup): ElementorElement {
         title: t.characters,
         header_size: tag,
         align: alignToText(t.align),
-        title_color: t.color ?? undefined,
+        title_color: elementorColor(t.color ?? undefined),
         typography_typography: 'custom',
         typography_font_family: t.fontFamily ?? undefined,
         typography_font_size: t.fontSize ? sizePx(t.fontSize) : undefined,
@@ -280,9 +287,9 @@ function mapText(node: ExtractedNode, lookup: TokenLookup): ElementorElement {
         typography_text_decoration: textDecorationCss(t.textDecoration),
       }
     : {
-        editor: `<p>${escapeRichText(t.characters)}</p>`,
+        editor: textEditorHtml(t),
         align: alignToText(t.align),
-        text_color: t.color ?? undefined,
+        text_color: elementorColor(t.color ?? undefined),
         typography_typography: 'custom',
         typography_font_family: t.fontFamily ?? undefined,
         typography_font_size: t.fontSize ? sizePx(t.fontSize) : undefined,
@@ -389,14 +396,14 @@ function mapButton(node: ExtractedNode, lookup: TokenLookup): ElementorElement {
     typography_font_family: fontFamily,
     typography_font_size: fontSize ? sizePx(fontSize) : undefined,
     typography_font_weight: fontWeight,
-    background_color: fillColor,
-    button_text_color: textColor,
-    hover_color: hoverText,
-    button_background_hover_color: hoverBg,
-    button_hover_border_color: hoverBorder,
+    background_color: elementorColor(fillColor),
+    button_text_color: elementorColor(textColor),
+    hover_color: elementorColor(hoverText),
+    button_background_hover_color: elementorColor(hoverBg),
+    button_hover_border_color: elementorColor(hoverBorder),
     border_border: stroke ? 'solid' : undefined,
     border_width: stroke ? uniformPx(stroke.weight) : undefined,
-    border_color: stroke ? stroke.color : undefined,
+    border_color: stroke ? elementorColor(stroke.color) : undefined,
     border_radius: borderRadiusSetting(node.cornerRadius),
     text_padding: paddingSetting(node.layout.padding),
   };
@@ -459,7 +466,7 @@ function mapShape(node: ExtractedNode, lookup: TokenLookup): ElementorElement | 
     const shadow = boxShadowSettings(node.effects);
     const settings: Record<string, unknown> = {
       background_background: backgroundType(node.fills),
-      background_color: bgColor,
+      background_color: elementorColor(bgColor),
       background_image: bgImage,
       border_radius: borderRadiusSetting(node.cornerRadius),
       box_shadow_box_shadow_type: shadow ? 'yes' : undefined,
@@ -468,7 +475,7 @@ function mapShape(node: ExtractedNode, lookup: TokenLookup): ElementorElement | 
       min_height: sizePx(node.height),
       border_border: hasStroke ? 'solid' : undefined,
       border_width: hasStroke ? uniformPx(node.strokes[0].weight) : undefined,
-      border_color: hasStroke ? node.strokes[0].color : undefined,
+      border_color: hasStroke ? elementorColor(node.strokes[0].color) : undefined,
     };
     if (gradient) Object.assign(settings, gradient);
     const bgToken = lookupColorToken(lookup, bgColor);
@@ -492,7 +499,7 @@ function mapShape(node: ExtractedNode, lookup: TokenLookup): ElementorElement | 
       elType: 'widget',
       widgetType: 'divider',
       settings: clean({
-        color: s.color,
+        color: elementorColor(s.color),
         weight: { unit: 'px', size: Math.round(s.weight), sizes: [] },
         style: 'solid',
         _element_width: 'initial',
@@ -545,6 +552,25 @@ function attachToken(settings: Record<string, unknown>, settingKey: string, toke
   const map = existing ?? {};
   map[settingKey] = tokenPath;
   settings.__tokens__ = map;
+}
+
+// Convert an 8-digit hex (#RRGGBBAA, produced by the extractor for fills /
+// strokes / shadows with opacity < 1) into a CSS rgba() string. Elementor's
+// color controls do not reliably apply the alpha channel from 8-digit hex —
+// they expect rgba() — so any color written into Elementor settings goes
+// through here. 6-digit hex and already-rgba values pass through unchanged.
+// NOTE: only apply this to *output* values, never to the key used for token
+// lookup (tokens are keyed by the raw hex).
+function elementorColor(c: string | undefined): string | undefined {
+  if (!c) return c;
+  const m = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})$/.exec(c);
+  if (!m) return c;
+  const r = parseInt(m[1].slice(0, 2), 16);
+  const g = parseInt(m[1].slice(2, 4), 16);
+  const b = parseInt(m[1].slice(4, 6), 16);
+  const a = Math.round((parseInt(m[2], 16) / 255) * 100) / 100;
+  if (a >= 1) return `#${m[1].toUpperCase()}`;
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
 function sizePx(v: number) {
@@ -632,9 +658,9 @@ function gradientBackground(fills: Fill[]): Record<string, unknown> | undefined 
   const isRadial = f.type === 'GRADIENT_RADIAL' || f.type === 'GRADIENT_DIAMOND';
   const out: Record<string, unknown> = {
     background_background: 'gradient',
-    background_color: first.color,
+    background_color: elementorColor(first.color),
     background_color_stop: { unit: '%', size: Math.round(first.position * 100), sizes: [] },
-    background_color_b: last.color,
+    background_color_b: elementorColor(last.color),
     background_color_b_stop: { unit: '%', size: Math.round(last.position * 100), sizes: [] },
     background_gradient_type: isRadial ? 'radial' : 'linear',
   };
@@ -669,7 +695,7 @@ function boxShadowSettings(effects: Effect[] | undefined) {
     vertical: Math.round(shadow.offsetY),
     blur: Math.round(shadow.radius),
     spread: Math.round(shadow.spread),
-    color: shadow.color,
+    color: elementorColor(shadow.color),
     position: shadow.type === 'INNER_SHADOW' ? 'inset' : '',
   };
 }
@@ -783,11 +809,54 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;');
 }
 
+function escapeAttr(s: string): string {
+  return escapeHtml(s).replace(/"/g, '&quot;');
+}
+
+// Build the editor HTML for a text-editor widget. Prefers inline rich-text
+// runs (bold keywords, inline links, colored spans) when the Figma text
+// node had more than one styled segment; otherwise falls back to the plain
+// escape+newline path. Returns block-complete HTML (already wrapped in
+// <p>/<ul>) — callers must NOT wrap it again.
+function textEditorHtml(t: TextStyle): string {
+  if (t.runs && t.runs.length > 1) return runsToHtml(t);
+  return escapeRichText(t.characters);
+}
+
+// Reconstruct inline formatting from per-segment runs relative to the base
+// style. Only deltas that Elementor can express inline are emitted: weight
+// (≥600 → <strong>), underline, hyperlinks, and color overrides.
+function runsToHtml(t: TextStyle): string {
+  const runs = t.runs ?? [];
+  const baseWeight = t.fontWeight ?? 400;
+  let inner = '';
+  for (const r of runs) {
+    let text = escapeHtml(r.text).split(/\r?\n/).join('<br>');
+    let open = '';
+    let close = '';
+    const weight = r.fontWeight ?? baseWeight;
+    if (weight >= 600 && baseWeight < 600) { open += '<strong>'; close = '</strong>' + close; }
+    if (r.textDecoration === 'UNDERLINE') { open += '<u>'; close = '</u>' + close; }
+    if (r.color && r.color !== t.color) {
+      open += `<span style="color:${elementorColor(r.color)}">`;
+      close = '</span>' + close;
+    }
+    if (r.link && r.link.value) {
+      const url = r.link.value;
+      const ext = /^https?:\/\//i.test(url) ? ' target="_blank" rel="noopener"' : '';
+      open += `<a href="${escapeAttr(url)}"${ext}>`;
+      close = '</a>' + close;
+    }
+    inner += open + text + close;
+  }
+  return `<p>${inner}</p>`;
+}
+
 // Escape user-authored copy for an Elementor text-editor widget and
 // preserve newlines as <br> so multi-line paragraphs survive the round
 // trip. Bullet-style prefixes ("- ", "• ", "* ") are wrapped into a real
 // <ul> so Elementor's editor renders a proper list rather than a flat
-// run with leading dashes.
+// run with leading dashes. Returns block-complete HTML.
 function escapeRichText(s: string): string {
   const escaped = escapeHtml(s);
   const lines = escaped.split(/\r?\n/);
@@ -800,7 +869,7 @@ function escapeRichText(s: string): string {
       .join('');
     return `<ul>${items}</ul>`;
   }
-  return lines.join('<br>');
+  return `<p>${lines.join('<br>')}</p>`;
 }
 
 // Walk template to count widgets/sections (used in metadata). Only top-level

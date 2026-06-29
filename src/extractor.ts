@@ -1118,8 +1118,18 @@ function looksLikeCounterText(node: ExtractedNode): CounterHint | null {
   if (!node.text || !node.text.characters) return null;
   const size = node.text.fontSize ?? 0;
   if (size < 20) return null;
-  return parseCounter(node.text.characters);
+  const parsed = parseCounter(node.text.characters);
+  if (!parsed) return null;
+  // Currency-prefixed amounts ("$99", "€1,200") are prices, not stat
+  // counters. Stamping them as counters mislabels pricing sections as
+  // "stats" and pushes the agent to build a counter widget instead of a
+  // price table. parseCounter itself stays currency-agnostic (it still
+  // parses "$1.2M") — this gate is the right place to exclude prices.
+  if (parsed.prefix && CURRENCY_PREFIX_RX.test(parsed.prefix)) return null;
+  return parsed;
 }
+
+const CURRENCY_PREFIX_RX = /^[$€£¥₹]$/;
 
 // --- Decorative + importance --------------------------------------------
 

@@ -204,6 +204,21 @@ test('detectSectionPurpose returns pricing when name hints at it', () => {
   assert.equal(detectSectionPurpose(node), 'pricing');
 });
 
+test('detectSectionPurpose prefers pricing over stats even with counter-like numbers', () => {
+  // A pricing section whose price headings parsed as counters must still be
+  // classified as pricing, not stats (fix: pricing check runs before stats).
+  const priceCounter = makeNode({
+    semanticRole: 'text',
+    widgetHint: 'counter',
+    counterHint: { raw: '99', value: 99 },
+  });
+  const node = makeNode({
+    name: 'Pricing',
+    children: [makeNode({ children: [priceCounter] })],
+  });
+  assert.equal(detectSectionPurpose(node), 'pricing');
+});
+
 test('brandColorHygieneWarnings fires when fewer than 2 brand-named paint styles exist', () => {
   const tokens: DesignTokens = {
     colors: [], typography: [], spacing: [], radii: [],
