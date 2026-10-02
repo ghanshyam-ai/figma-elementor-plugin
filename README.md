@@ -7,12 +7,13 @@ The ZIP contains:
 
 ```
 export/
-├── ai-layout.json     # Compact AI-friendly summary (page type + sections + content)
+├── data.json          # PRIMARY: full Elementor template (containers + widgets) — build from this
 ├── global.json        # Design tokens: colors, typography, Figma styles, variables, semantic map
 ├── assets.json        # Asset manifest: type / format / alt / decorative flag
+├── ai-layout.json     # Semantic index/hint layer (page type + section purposes) — supplements data.json
 ├── tags.json          # Developer-authored widget + section-purpose overrides
-├── validation.json    # Warnings (unnamed layers, absolute layout, mixed fonts, ...)
-├── data.json          # Elementor template (containers + widgets) — preview/debug
+├── canonical-graph.json # Raw per-node Figma evidence (geometry, transforms, fills, text, components, variables) — evidence only
+├── validation.json    # Warnings + assetReferences / assetExport / elementorSchema reports
 ├── metadata.json      # File / page / counts
 ├── screenshots/
 │   └── <frame>.png    # 2× PNG of each selected frame
@@ -23,12 +24,72 @@ export/
 
 ### Recommended consumption for AI agents
 
-Prefer `ai-layout.json` + `tokens.json` + `assets.json` + screenshots over the
-raw Figma tree — they cut prompt-token cost dramatically and surface
-semantic intent that's lost in the raw geometry. Use `validation.json` to
-decide which sections need a manual visual fallback. `data.json` is kept
-as a preview/debug artifact: the long-term intent is *plugin extracts
-design data only, an agent maps to Elementor*.
+**Build from `data.json`.** It is the complete, ready-to-import Elementor
+template (`title` / `type` / `version` / `page_settings` / `content`) with
+every container and widget, exact colors, typography, spacing, borders,
+shadows, and layout — matching Elementor's own export schema. This is the
+high-fidelity artifact; reconstructing the page from anything lossier is the
+single biggest cause of low-accuracy output.
+
+Use the other files as *support*, not as the build source:
+
+- `global.json` — design tokens, so you can wire an Elementor global kit
+  instead of leaving every value hardcoded.
+- `assets.json` + `assets/images/` — the asset manifest and files. **You
+  must upload each image to WP media and rewrite the widget's `image.url` +
+  `image.id`** — see "Image handling" below. Image widgets in `data.json`
+  ship with `_placeholder: true` and a relative `assets/images/...` path
+  that will not render until rewritten.
+- `screenshots/` — the visual ground truth to diff your result against.
+- `ai-layout.json` — a compact semantic *index* (page type, per-section
+  purpose/role, content roll-ups). Use it to understand intent and to locate
+  sections (every entry shares the Figma node id stamped on `data.json`
+  settings as `_figma_id`). Do **not** rebuild the page from it — it is a
+  lossy summary that keeps only one heading/paragraph/image per section.
+- `validation.json` — decide which sections need a manual visual fallback.
+
+### Image handling
+
+`data.json` image widgets are deliberately emitted as placeholders:
+
+```json
+"image": { "url": "assets/images/img_1.png", "id": "", "source": "url",
+           "_placeholder": true, "_figma_asset_id": "img_1" }
+```
+
+The relative path is not resolvable by WordPress. Before/at import, for each
+image widget: upload `assets/images/<file>` to the WP media library, set
+`image.url` to the returned URL and `image.id` to the attachment id, then
+drop the `_placeholder` and `_figma_asset_id` flags. `assets.json` maps every
+`_figma_asset_id` to its file, format, dimensions, and alt text.
+
+Assets are exported **before** mapping, and the file extension follows the
+sniffed bytes of the original upload (`.png` / `.jpg` / `.webp` / `.gif`).
+`data.json` is written against the final filenames, including SVG→PNG
+fallbacks and de-duplicated aliases. Every `IMAGE` paint keeps its
+`fillIndex`, `imageHash`, `imageTransform`, `scalingFactor`, `rotation` and
+`filters` in `_figma_image_fills`; cropped / tiled / rotated / filtered /
+masked images also get a 2× rendered reference under
+`assets/images/rendered/`. `validation.json` reports
+`assetReferences.{missingAssets,brokenAssetReferences}` and
+`assetExport.{queuedAssets,successfulAssets,failedAssets}`.
+
+### Responsive frames
+
+Name sibling frames `Homepage Desktop` / `Homepage Tablet` / `Homepage Mobile`
+(also `Web`, `iPad`, `Phone`…) and select them together. They are paired into
+**one** page: the desktop tree is mapped and differences become Elementor
+`_tablet` / `_mobile` settings (`flex_direction`, `flex_gap`, `padding`,
+`width`, `typography_font_size`, `typography_line_height`,
+`typography_letter_spacing`, `align`). With no mobile frame, only a
+conservative fallback runs (wide multi-card rows stack on mobile). Figma has
+no margin concept, so `margin_*` is never emitted.
+
+`global.json › elementorGlobals` maps tokens onto Elementor Global Colors,
+Global Fonts and Site Settings; `references` gives the token-path →
+`globals/…?id=` table for the WordPress-side importer. `data.json` does not
+emit `__globals__` itself (a system id such as `primary` would resolve to the
+site's *old* value until the Kit is updated).
 
 ## Install (development)
 
@@ -118,8 +179,12 @@ every Elementor `settings` block (in `data.json`) and on each AI section
 | `src/extractor.ts` | Walks a Figma node tree → `ExtractedNode` with semantic roles, effects, computed styles, parent/child metadata. |
 | `src/tokens.ts` | Aggregates global design tokens; reads Figma local styles + variables. |
 | `src/aiLayout.ts` | Builds `ai-layout.json`, `assets.json`, `validation.json`. |
-| `src/mapper.ts` | Maps `ExtractedNode` → Elementor JSON (preview/debug). |
-| `src/exporter.ts` | Image fills, vector → SVG/PNG, and frame screenshots via `exportAsync`. |
+| `src/mapper.ts` | Maps `ExtractedNode` → the Elementor template in `data.json` (the primary build artifact). |
+| `src/exporter.ts` | Image fills (real format), vector → SVG/PNG, rendered references, frame screenshots. |
+| `src/canonical.ts` / `src/figmaEvidence.ts` | `canonical-graph.json` and the shared raw-evidence readers (transforms, render bounds, masks, components, variables). |
+| `src/responsive.ts` | Pairs Desktop/Tablet/Mobile frames and diffs them into per-node responsive overrides. |
+| `src/assetValidation.ts` / `src/elementorSchema.ts` | Final asset-reference check + Elementor JSON/settings-key validation. |
+| `src/elementorGlobals.ts` | Token → Elementor Global Colors / Fonts / Site Settings mapping. |
 | `src/types.ts` | Shared types + plugin↔UI message protocol. |
 | `ui/ui.html` + `ui/ui.ts` | Plugin UI. Receives data and packages the ZIP via JSZip. |
 

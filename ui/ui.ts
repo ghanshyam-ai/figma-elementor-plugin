@@ -7,6 +7,7 @@ import type {
   AILayout,
   Asset,
   AssetManifestEntry,
+  CanonicalGraph,
   ElementorTemplate,
   Metadata,
   PluginToUIMessage,
@@ -31,6 +32,7 @@ let lastBundle: {
   aiLayout: AILayout;
   assetManifest: AssetManifestEntry[];
   validation: ValidationReport;
+  canonicalGraph: CanonicalGraph;
   taggedSummary: TaggedNodeSummary[];
 } | null = null;
 
@@ -70,6 +72,7 @@ const preflightBtn = $<HTMLButtonElement>('preflight');
 populateCatalogs();
 
 extractBtn.addEventListener('click', () => {
+  lastBundle = null;
   setBusy(true);
   logEl.innerHTML = '';
   setProgress(0);
@@ -176,15 +179,15 @@ window.addEventListener('message', (event: MessageEvent) => {
         aiLayout: msg.aiLayout,
         assetManifest: msg.assetManifest,
         validation: msg.validation,
+        canonicalGraph: msg.canonicalGraph,
         taggedSummary: msg.taggedSummary,
       };
       const m = msg.metadata.counts;
       const warnCount = msg.validation.warnings.length;
       statsEl.innerHTML = `<strong>${m.nodes}</strong> nodes · <strong>${m.sections}</strong> sections · <strong>${m.widgets}</strong> widgets · <strong>${m.assets}</strong> assets · <strong>${warnCount}</strong> warnings`;
       renderWarnings(msg.validation.warnings);
-      downloadBtn.disabled = false;
-      setBusy(false);
-      appendLog('info', 'Ready to download.');
+      setPhase('done');
+      appendLog('info', 'Extraction complete — click Download ZIP.');
       break;
     case 'preflight-result':
       preflightBtn.disabled = false;
@@ -207,9 +210,26 @@ function send(msg: UIToPluginMessage) {
   parent.postMessage({ pluginMessage: msg }, '*');
 }
 
+const doneBannerEl = $('done-banner');
+
+type UiPhase = 'idle' | 'busy' | 'done';
+
+// idle: Extract is the call to action. busy: Extract shows progress.
+// done: Download ZIP turns blue + enabled and Extract steps back to a
+// secondary "Extract again", so it is obvious the next step is downloading.
+function setPhase(phase: UiPhase) {
+  extractBtn.disabled = phase === 'busy';
+  extractBtn.textContent = phase === 'busy' ? 'Extracting…' : phase === 'done' ? 'Extract again' : 'Extract design';
+  extractBtn.classList.toggle('primary', phase !== 'done');
+  downloadBtn.disabled = phase !== 'done';
+  downloadBtn.classList.toggle('download-ready', phase === 'done');
+  downloadBtn.textContent = phase === 'done' ? '⬇ Download ZIP' : 'Download ZIP';
+  doneBannerEl.classList.toggle('show', phase === 'done');
+}
+
 function setBusy(busy: boolean) {
-  extractBtn.disabled = busy;
-  if (busy) downloadBtn.disabled = true;
+  if (busy) setPhase('busy');
+  else setPhase(lastBundle ? 'done' : 'idle');
 }
 
 function setProgress(v: number) {
@@ -446,6 +466,8 @@ async function packageZip(bundle: NonNullable<typeof lastBundle>) {
   root.file('ai-layout.json', JSON.stringify(bundle.aiLayout, null, 2));
   root.file('assets.json', JSON.stringify(bundle.assetManifest, null, 2));
   root.file('validation.json', JSON.stringify(bundle.validation, null, 2));
+  // Raw Figma evidence layer (mapper-independent). data.json stays primary.
+  root.file('canonical-graph.json', JSON.stringify(bundle.canonicalGraph));
   root.file('metadata.json', JSON.stringify(bundle.metadata, null, 2));
   // tags.json — every user-authored override on the page at extraction
   // time. Lets reviewers audit which tags were authored manually versus
@@ -511,18 +533,21 @@ function readmeText(meta: Metadata): string {
     `Exported by ${meta.generator} v${meta.version} at ${meta.exportedAt}.`,
     '',
     '## Files',
-    '- `ai-layout.json` – compact, AI-friendly summary (page type + sections + content roll-ups)',
+    '- `data.json` – **PRIMARY**: full Elementor template (containers + widgets). Build from this.',
     '- `global.json` – design tokens (colors, typography, spacing, radii, Figma styles, variables)',
     '- `assets.json` – asset manifest with type, format and alt text',
+    '- `ai-layout.json` – semantic index/hint layer (page type + section purposes). Supplements data.json; do not rebuild from it.',
     '- `tags.json` – developer-authored widget + section-purpose overrides',
+    '- `canonical-graph.json` – raw per-node Figma evidence (geometry, transforms, fills, effects, text, components, variables, prototype). Evidence only — data.json remains the primary artifact.',
     '- `validation.json` – warnings (unnamed layers, absolute layout, mixed fonts, large rasters, ...)',
-    '- `data.json` – Elementor template (containers + widgets) — preview/debug',
     '- `metadata.json` – source + counts',
     '- `screenshots/` – PNG render of each selected frame',
     '- `assets/images/` – exported image fills, icons (SVG when possible) and rasterised graphics',
     '',
     '## Recommended consumption',
-    'For AI agents, prefer `ai-layout.json` + `global.json` + `assets.json` + screenshots over the raw tree.',
+    'Build the page from `data.json` — it is the complete Elementor template (matches Elementor’s own export schema).',
+    'Use `global.json` for tokens, `screenshots/` as the visual ground truth, and `ai-layout.json` only as a semantic index (it is a lossy summary — do not reconstruct the page from it).',
+    'Images in `data.json` are placeholders: upload each `assets/images/<file>` to WP media, then set the widget’s `image.url`/`image.id` and drop the `_placeholder` flag. `assets.json` maps every `_figma_asset_id` to its file.',
     'Use `validation.json` to decide which sections need a manual visual fallback.',
     '',
     '## Counts',

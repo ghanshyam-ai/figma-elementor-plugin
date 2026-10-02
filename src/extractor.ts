@@ -10,6 +10,7 @@ import type {
   ExtractedNode,
   Fill,
   HeadingLevel,
+  ImageFill,
   Importance,
   InputMetadata,
   InteractionStates,
@@ -28,6 +29,14 @@ import type {
 } from './types';
 
 import { SECTION_PURPOSE_VALUES, WIDGET_HINT_VALUES } from './catalog';
+import {
+  isEffectivelyVisible,
+  readComponentMeta,
+  readMask,
+  readNodeVariables,
+  readRenderBounds,
+  readTransforms,
+} from './figmaEvidence';
 
 // Plugin-data keys used to persist developer-authored tagging overrides on
 // Figma nodes. These survive across plugin runs and file reopens because
@@ -73,8 +82,31 @@ function gradientCssAngle(transform: number[][] | undefined): number | undefined
 export class ImageRegistry {
   private map = new Map<string, string>(); // imageHash -> assetId
   private usedIds = new Set<string>(); // reserve asset ids to detect prefix collisions
+  // assetId -> every (node, fill slot) that paints this image.
+  private usages = new Map<string, { nodeId: string; fillIndex: number }[]>();
 
-  register(hash: string): string {
+  register(hash: string, usage?: { nodeId: string; fillIndex: number }): string {
+    const id = this.registerHash(hash);
+    if (usage) {
+      const list = this.usages.get(id) ?? [];
+      if (!list.some((u) => u.nodeId === usage.nodeId && u.fillIndex === usage.fillIndex)) {
+        list.push(usage);
+      }
+      this.usages.set(id, list);
+    }
+    return id;
+  }
+
+  // assetId for an already-registered hash; never registers a new one.
+  lookup(hash: string): string | undefined {
+    return this.map.get(hash);
+  }
+
+  usagesOf(assetId: string): { nodeId: string; fillIndex: number }[] {
+    return this.usages.get(assetId) ?? [];
+  }
+
+  private registerHash(hash: string): string {
     let id = this.map.get(hash);
     if (!id) {
       const safe = hash.replace(/[^a-zA-Z0-9_-]/g, '');
@@ -113,10 +145,12 @@ function djb2Short(s: string): string {
 function convertFills(
   fills: readonly Paint[] | typeof figma.mixed | undefined,
   registry: ImageRegistry,
+  nodeId = '',
 ): Fill[] {
   if (!fills || fills === figma.mixed) return [];
   const out: Fill[] = [];
-  for (const f of fills) {
+  for (let fillIndex = 0; fillIndex < fills.length; fillIndex += 1) {
+    const f = fills[fillIndex];
     if (!f.visible && f.visible !== undefined) continue;
     const opacity = f.opacity ?? 1;
     if (f.type === 'SOLID') {
@@ -140,12 +174,29 @@ function convertFills(
         angle: f.type === 'GRADIENT_LINEAR' ? gradientCssAngle(transformOut) : undefined,
       });
     } else if (f.type === 'IMAGE' && f.imageHash) {
-      out.push({
+      const img = f as ImagePaint;
+      const fill: ImageFill = {
         type: 'IMAGE',
         opacity,
-        assetId: registry.register(f.imageHash),
+        assetId: registry.register(f.imageHash, { nodeId, fillIndex }),
         scaleMode: f.scaleMode,
-      });
+        fillIndex,
+        imageHash: f.imageHash,
+      };
+      if (img.imageTransform) fill.imageTransform = img.imageTransform.map((row) => Array.from(row));
+      if (typeof img.scalingFactor === 'number') fill.scalingFactor = img.scalingFactor;
+      if (typeof img.rotation === 'number' && img.rotation !== 0) fill.rotation = img.rotation;
+      if (img.filters) {
+        const kept: Record<string, number> = {};
+        for (const [k, v] of Object.entries(img.filters)) {
+          if (typeof v === 'number' && v !== 0) kept[k] = v;
+        }
+        if (Object.keys(kept).length > 0) fill.filters = kept;
+      }
+      if (img.blendMode && img.blendMode !== 'NORMAL' && img.blendMode !== 'PASS_THROUGH') {
+        fill.blendMode = img.blendMode;
+      }
+      out.push(fill);
     }
   }
   return out;
@@ -319,33 +370,68 @@ function readText(node: TextNode): TextStyle {
     color: firstSolid ? rgbToHex(firstSolid.color, firstSolid.opacity ?? 1) : null,
   };
   if (runs && runs.length > 1) out.runs = runs;
+  // Paragraph-level properties that apply to the whole node.
+  const ps = maybeMixed(node.paragraphSpacing);
+  if (typeof ps === 'number' && ps !== 0) out.paragraphSpacing = ps;
+  const pi = maybeMixed(node.paragraphIndent);
+  if (typeof pi === 'number' && pi !== 0) out.paragraphIndent = pi;
+  const hl = maybeMixed(node.hyperlink);
+  if (hl) out.hyperlink = { type: hl.type, value: hl.value };
+  if (runs && runs.length === 1) {
+    // Single-run text still carries list / OpenType settings worth keeping.
+    const r = runs[0];
+    if (r.listOptions) out.listOptions = r.listOptions;
+    if (r.openTypeFeatures) out.openTypeFeatures = r.openTypeFeatures;
+  }
   return out;
 }
 
 // Per-segment styling (bold keywords, colored links, inline size jumps).
 // Returns undefined when the API isn't available; returns the segments
 // array even if there's only one — caller decides whether to surface it.
-function readTextRuns(node: TextNode): TextRun[] | undefined {
+type RawSegment = {
+  start: number;
+  end: number;
+  characters: string;
+  fontName: FontName;
+  fontSize: number;
+  fills: readonly Paint[];
+  textDecoration?: string;
+  textCase?: string;
+  hyperlink?: { type: 'URL' | 'NODE'; value: string } | null;
+  lineHeight?: LineHeight;
+  letterSpacing?: LetterSpacing;
+  textDecorationStyle?: string | null;
+  listOptions?: { type: 'NONE' | 'ORDERED' | 'UNORDERED' };
+  indentation?: number;
+  paragraphSpacing?: number;
+  paragraphIndent?: number;
+  openTypeFeatures?: Record<string, boolean>;
+};
+
+const BASE_SEGMENT_FIELDS = ['fontName', 'fontSize', 'fills', 'textDecoration', 'textCase', 'hyperlink'] as const;
+const EXTENDED_SEGMENT_FIELDS = [
+  ...BASE_SEGMENT_FIELDS,
+  'lineHeight', 'letterSpacing', 'textDecorationStyle', 'listOptions',
+  'indentation', 'paragraphSpacing', 'paragraphIndent', 'openTypeFeatures',
+] as const;
+
+export function readTextRuns(node: TextNode): TextRun[] | undefined {
   if (typeof node.getStyledTextSegments !== 'function') return undefined;
-  let segs: ReadonlyArray<{
-    start: number;
-    end: number;
-    characters: string;
-    fontName: FontName;
-    fontSize: number;
-    fills: readonly Paint[];
-    textDecoration?: string;
-    textCase?: string;
-    hyperlink?: { type: 'URL' | 'NODE'; value: string } | null;
-  }>;
+  let segs: ReadonlyArray<RawSegment> | undefined;
+  // Ask for the full property set first; older runtimes reject unknown
+  // fields, so retry with the original six before giving up.
   try {
-    segs = node.getStyledTextSegments(
-      ['fontName', 'fontSize', 'fills', 'textDecoration', 'textCase', 'hyperlink'],
-    ) as typeof segs;
+    segs = node.getStyledTextSegments(EXTENDED_SEGMENT_FIELDS as unknown as never[]) as unknown as typeof segs;
   } catch {
-    return undefined;
+    try {
+      segs = node.getStyledTextSegments(BASE_SEGMENT_FIELDS as unknown as never[]) as unknown as typeof segs;
+    } catch {
+      return undefined;
+    }
   }
   if (!segs || segs.length === 0) return undefined;
+  const scratch = new ImageRegistry();
   return segs.map((s) => {
     const solid = s.fills.find((f) => f.type === 'SOLID' && f.visible !== false) as
       | SolidPaint
@@ -357,13 +443,34 @@ function readTextRuns(node: TextNode): TextRun[] | undefined {
     };
     if (s.fontName) {
       run.fontFamily = s.fontName.family;
+      run.fontStyle = s.fontName.style;
       run.fontWeight = fontWeightFromStyle(s.fontName.style);
     }
     if (typeof s.fontSize === 'number') run.fontSize = s.fontSize;
     if (solid) run.color = rgbToHex(solid.color, solid.opacity ?? 1);
+    const paints = convertFills(s.fills, scratch).filter((f) => f.type !== 'IMAGE');
+    if (paints.length > 0) run.fills = paints;
+    if (s.lineHeight && typeof s.lineHeight === 'object' && 'unit' in s.lineHeight) {
+      run.lineHeight = s.lineHeight.unit === 'AUTO'
+        ? 'AUTO'
+        : { value: (s.lineHeight as { value: number }).value, unit: s.lineHeight.unit };
+    }
+    if (s.letterSpacing && typeof s.letterSpacing === 'object' && 'unit' in s.letterSpacing) {
+      run.letterSpacing = { value: s.letterSpacing.value, unit: s.letterSpacing.unit };
+    }
     if (s.textDecoration) run.textDecoration = s.textDecoration;
+    if (s.textDecorationStyle) run.textDecorationStyle = s.textDecorationStyle;
     if (s.textCase) run.textCase = s.textCase;
     if (s.hyperlink) run.link = { type: s.hyperlink.type, value: s.hyperlink.value };
+    if (s.listOptions && s.listOptions.type !== 'NONE') run.listOptions = { type: s.listOptions.type };
+    if (typeof s.indentation === 'number' && s.indentation !== 0) run.indentation = s.indentation;
+    if (typeof s.paragraphSpacing === 'number' && s.paragraphSpacing !== 0) run.paragraphSpacing = s.paragraphSpacing;
+    if (typeof s.paragraphIndent === 'number' && s.paragraphIndent !== 0) run.paragraphIndent = s.paragraphIndent;
+    if (s.openTypeFeatures) {
+      const on: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(s.openTypeFeatures)) if (v) on[k] = true;
+      if (Object.keys(on).length > 0) run.openTypeFeatures = on;
+    }
     return run;
   });
 }
@@ -1828,6 +1935,7 @@ async function walk(
   const fills = convertFills(
     'fills' in node ? (node.fills as readonly Paint[]) : undefined,
     registry,
+    node.id,
   );
   const strokes = convertStrokes(node);
   const effects = convertEffects(node);
@@ -1878,6 +1986,7 @@ async function walk(
     absoluteBounds,
     relativeBounds,
     rotation: 'rotation' in node ? node.rotation : undefined,
+    effectiveVisible: isEffectivelyVisible(node),
     opacity: 'opacity' in node ? node.opacity : undefined,
     cornerRadius: readCornerRadius(node),
     fills,
@@ -1889,6 +1998,24 @@ async function walk(
     children: [],
     ...styleIds,
   };
+
+  // Raw geometry / mask / component / variable evidence (also feeds
+  // canonical-graph.json through the same readers).
+  const transforms = readTransforms(node);
+  if (transforms.absoluteTransform) result.absoluteTransform = transforms.absoluteTransform;
+  if (transforms.relativeTransform) result.relativeTransform = transforms.relativeTransform;
+  const render = readRenderBounds(node);
+  if (render.renderBounds) result.renderBounds = render.renderBounds;
+  const hasRotation = typeof result.rotation === 'number' && result.rotation !== 0;
+  if (render.extendsBeyondBounds || (hasRotation && render.renderBounds)) result.extendsBeyondBounds = true;
+  Object.assign(result, readMask(node));
+  if ('blendMode' in node && node.blendMode && node.blendMode !== 'PASS_THROUGH' && node.blendMode !== 'NORMAL') {
+    result.blendMode = node.blendMode;
+  }
+  const componentMeta = await readComponentMeta(node);
+  if (componentMeta) result.component = componentMeta;
+  const nodeVars = readNodeVariables(node);
+  if (nodeVars) result.variables = nodeVars;
 
   if (node.type === 'TEXT') {
     result.text = readText(node);

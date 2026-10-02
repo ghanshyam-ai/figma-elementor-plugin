@@ -4,6 +4,7 @@ import type {
   AISection,
   AccessibilityMetadata,
   Asset,
+  AssetExportReport,
   AssetManifestEntry,
   ComponentTemplate,
   ContentPriority,
@@ -549,6 +550,10 @@ function assignContentPriority(section: ExtractedNode): void {
 export function buildAssetManifest(
   trees: ExtractedNode[],
   exportedAssets: Asset[],
+  extras: {
+    report?: AssetExportReport;
+    registry?: { usagesOf(assetId: string): { nodeId: string; fillIndex: number }[] };
+  } = {},
 ): AssetManifestEntry[] {
   const entries: AssetManifestEntry[] = [];
   const used = new Map<string, ExtractedNode>();
@@ -576,6 +581,29 @@ export function buildAssetManifest(
       nodeId: node?.id,
       iconHint,
       aliasIds: asset.aliasIds,
+      usages: extras.registry?.usagesOf(asset.id),
+      role: asset.role ?? 'original',
+      referenceFor: asset.referenceFor,
+      exportStatus: 'exported',
+    });
+  }
+  // Assets that were queued but never produced bytes stay visible in the
+  // manifest as failed, so a widget pointing at them is diagnosable.
+  const exportedIds = new Set(exportedAssets.map((a) => a.id));
+  for (const f of extras.report?.failedAssets ?? []) {
+    if (exportedIds.has(f.id)) continue;
+    const node = used.get(f.id);
+    entries.push({
+      id: f.id,
+      filename: '',
+      assetType: node?.assetType ?? 'image',
+      originalFormat: node?.originalFormat ?? 'png',
+      suggestedExportFormat: node?.suggestedExportFormat ?? 'png',
+      width: 0,
+      height: 0,
+      nodeId: node?.id,
+      usages: extras.registry?.usagesOf(f.id),
+      exportStatus: 'failed',
     });
   }
   return entries;
@@ -727,7 +755,10 @@ export function buildValidationReport(
       });
     }
     // low-confidence semantic role
-    if (n.confidence !== undefined && n.confidence < 0.5 && n.semanticRole && n.semanticRole !== 'unknown') {
+    if (n.confidence !== undefined && n.confidence < 0.5 && n.semanticRole && n.semanticRole !== 'unknown' &&
+        // 'container' is the default fallback role — flagging it as low
+        // confidence is noise, not a signal.
+        n.semanticRole !== 'container') {
       raw.push({
         level: 'info',
         code: 'low-role-confidence',

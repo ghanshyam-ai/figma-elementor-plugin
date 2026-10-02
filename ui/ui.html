@@ -61,6 +61,17 @@
       button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
       button.primary:hover { background: var(--primary-hover); }
       button:disabled { opacity: 0.5; cursor: not-allowed; }
+      /* Post-extraction state: Download is the call to action, Extract steps back. */
+      button.download-ready {
+        background: #0d6efd; color: #fff; border-color: #0d6efd; opacity: 1;
+        box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.25);
+      }
+      button.download-ready:hover { background: #0b5ed7; }
+      .done-banner {
+        display: none; padding: 8px 10px; border-radius: 6px; font-size: 12px;
+        background: rgba(13, 110, 253, 0.12); color: #0d6efd; border: 1px solid rgba(13, 110, 253, 0.35);
+      }
+      .done-banner.show { display: block; }
       .progress {
         height: 6px;
         background: var(--surface);
@@ -286,6 +297,7 @@
         </div>
       </details>
 
+      <div class="done-banner" id="done-banner">✓ Extraction complete — click <strong>Download ZIP</strong> to save your export.</div>
       <div class="row">
         <button id="extract" class="primary">Extract design</button>
         <button id="download" disabled>Download ZIP</button>

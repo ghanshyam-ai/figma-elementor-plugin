@@ -1,40 +1,85 @@
-import type { Asset, AssetFormat, AssetType, ExtractedNode, Screenshot } from './types';
+import type {
+  Asset, AssetExportReport, AssetFormat, AssetType, ExtractedNode, Screenshot,
+} from './types';
 import type { ImageRegistry } from './extractor';
+import { detectImageFormat, extensionFor } from './imageFormat';
+
+export type ExportedAssets = {
+  assets: Asset[];
+  report: AssetExportReport;
+  // assetId (and every alias) -> final filename inside assets/images/.
+  // This is the single source of truth the mapper rewrites references from.
+  fileMap: Map<string, string>;
+};
+
+// Build the assetId -> filename lookup from the finalized asset list,
+// including aliases that collapsed onto a canonical asset.
+export function buildAssetFileMap(assets: Asset[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const a of assets) {
+    if (a.role === 'rendered-reference') continue;
+    map.set(a.id, a.filename);
+    for (const alias of a.aliasIds ?? []) map.set(alias, a.filename);
+  }
+  return map;
+}
 
 // Export image-fill assets registered during extraction, plus rasterise (or
 // SVG-export) any node that we classified as image-like but whose pixels live
 // in vector form. De-duplicated by asset id.
 //
-// Image-fill assetIds are content-addressed (`img_<hash>`), so the filename
-// `${assetId}.png` is stable across runs — the agent's media-library
-// uploader can skip re-uploading an unchanged image.
+// Image-fill assetIds are content-addressed (`img_<hash>`) and the extension
+// follows the sniffed bytes (Figma hands back the *original* upload, which
+// may be JPEG/WebP/GIF), so the filename is stable across runs — the agent's
+// media-library uploader can skip re-uploading an unchanged image.
 export async function exportAssets(
   imageNodes: { node: SceneNode; assetId: string; format: AssetFormat; assetType: AssetType }[],
   registry: ImageRegistry,
-): Promise<Asset[]> {
+  referenceNodes: RenderedReferenceCandidate[] = [],
+): Promise<ExportedAssets> {
   const out: Asset[] = [];
   const seen = new Set<string>();
+  const report: AssetExportReport = { queuedAssets: [], successfulAssets: [], failedAssets: [] };
+  const queue = (id: string, source: AssetExportReport['queuedAssets'][number]['source'], nodeId?: string) => {
+    report.queuedAssets.push({ id, source, nodeId });
+  };
+  const succeed = (a: Asset) => {
+    out.push(a);
+    seen.add(a.id);
+    report.successfulAssets.push({ id: a.id, filename: a.filename });
+  };
+  const fail = (id: string, e: unknown) => {
+    report.failedAssets.push({ id, reason: e instanceof Error ? e.message : String(e) });
+  };
 
   // 1. Image fills referenced via imageHash.
   for (const { hash, assetId } of registry.entries()) {
     if (seen.has(assetId)) continue;
+    queue(assetId, 'image-fill', registry.usagesOf(assetId)[0]?.nodeId);
     const image = figma.getImageByHash(hash);
-    if (!image) continue;
+    if (!image) {
+      fail(assetId, 'figma.getImageByHash returned null');
+      continue;
+    }
     try {
       const bytes = await image.getBytesAsync();
       const size = await image.getSizeAsync().catch(() => ({ width: 0, height: 0 }));
-      out.push({
+      const sniffed = detectImageFormat(bytes);
+      const format: AssetFormat = sniffed ?? 'png';
+      succeed({
         id: assetId,
-        filename: `${assetId}.png`,
+        filename: `${assetId}.${extensionFor(format)}`,
         bytes,
         width: size.width,
         height: size.height,
-        format: 'png',
+        format,
         assetType: 'image',
+        role: 'original',
+        formatUnverified: sniffed ? undefined : true,
       });
-      seen.add(assetId);
     } catch (e) {
       console.warn('Failed to export image', assetId, e);
+      fail(assetId, e);
     }
   }
 
@@ -48,6 +93,7 @@ export async function exportAssets(
   const aliases: { from: string; to: string }[] = [];
   for (const { node, assetId, format, assetType } of imageNodes) {
     if (seen.has(assetId)) continue;
+    queue(assetId, 'node-render', node.id);
     try {
       let bytes: Uint8Array;
       let outFormat: AssetFormat = format;
@@ -56,6 +102,8 @@ export async function exportAssets(
           bytes = await node.exportAsync({ format: 'SVG' });
         } catch {
           // SVG export can fail for some node types — fall back to PNG@2x.
+          // The file map below carries the .png name so data.json never
+          // keeps pointing at the old .svg.
           bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
           outFormat = 'png';
         }
@@ -70,24 +118,63 @@ export async function exportAssets(
         // asset id so mapper-side lookups still find a file.
         aliases.push({ from: assetId, to: existing });
         seen.add(assetId);
+        report.successfulAssets.push({ id: assetId, filename: `(alias of ${existing})` });
         continue;
       }
       byContentHash.set(contentHash, assetId);
-      const ext = outFormat === 'svg' ? 'svg' : 'png';
       const scale = outFormat === 'svg' ? 1 : 2;
-      out.push({
+      succeed({
         id: assetId,
-        filename: `${assetId}.${ext}`,
+        filename: `${assetId}.${extensionFor(outFormat)}`,
         bytes,
         width: 'width' in node ? Math.round(node.width * scale) : 0,
         height: 'height' in node ? Math.round(node.height * scale) : 0,
         format: outFormat,
         assetType,
         aliasIds: undefined,
+        role: 'original',
       });
-      seen.add(assetId);
     } catch (e) {
       console.warn('Failed to render node as image', assetId, e);
+      fail(assetId, e);
+    }
+  }
+
+  // 3. Rendered 2x Figma references for nodes whose crop / mask / filter /
+  // transform the raw image file cannot reproduce on its own.
+  for (const ref of referenceNodes) {
+    const refId = `ref_${ref.nodeId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    if (seen.has(refId)) continue;
+    queue(refId, 'rendered-reference', ref.nodeId);
+    try {
+      const node = await figma.getNodeByIdAsync(ref.nodeId);
+      if (!node || !('exportAsync' in node)) {
+        fail(refId, 'node not exportable');
+        continue;
+      }
+      const bytes = await (node as SceneNode).exportAsync({
+        format: 'PNG',
+        constraint: { type: 'SCALE', value: 2 },
+        useAbsoluteBounds: false,
+      });
+      const bounds = ('absoluteRenderBounds' in node && node.absoluteRenderBounds) || null;
+      const w = bounds ? bounds.width : 'width' in node ? node.width : 0;
+      const h = bounds ? bounds.height : 'height' in node ? node.height : 0;
+      succeed({
+        id: refId,
+        filename: `rendered/${refId}.png`,
+        bytes,
+        width: Math.round(w * 2),
+        height: Math.round(h * 2),
+        format: 'png',
+        assetType: 'image',
+        role: 'rendered-reference',
+        referenceFor: ref.assetId,
+        nodeId: ref.nodeId,
+      });
+    } catch (e) {
+      console.warn('Failed to render reference for', ref.nodeId, e);
+      fail(refId, e);
     }
   }
 
@@ -103,6 +190,30 @@ export async function exportAssets(
     }
   }
 
+  return { assets: out, report, fileMap: buildAssetFileMap(out) };
+}
+
+// A node whose image fill is cropped / tiled / rotated / filtered / masked,
+// so a plain copy of the original file will not match what Figma draws.
+export type RenderedReferenceCandidate = { nodeId: string; assetId: string };
+
+export function collectRenderedReferenceCandidates(trees: ExtractedNode[]): RenderedReferenceCandidate[] {
+  const out: RenderedReferenceCandidate[] = [];
+  function walk(n: ExtractedNode, underMask: boolean) {
+    const img = n.fills.find((f) => f.type === 'IMAGE');
+    if (img && img.type === 'IMAGE') {
+      const complex =
+        img.scaleMode === 'CROP' || img.scaleMode === 'TILE' ||
+        !!img.imageTransform || !!img.rotation || !!img.filters || !!img.blendMode ||
+        (n.rotation !== undefined && n.rotation !== 0) ||
+        n.fills.filter((f) => f.type === 'IMAGE').length > 1 ||
+        underMask || !!n.isMask;
+      if (complex) out.push({ nodeId: n.id, assetId: img.assetId });
+    }
+    const childUnderMask = underMask || n.children.some((c) => c.isMask);
+    for (const c of n.children) walk(c, childUnderMask);
+  }
+  for (const t of trees) walk(t, false);
   return out;
 }
 

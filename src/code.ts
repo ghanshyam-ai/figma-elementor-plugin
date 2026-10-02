@@ -10,7 +10,17 @@
 //   7. Export image assets + screenshots (exporter.ts)
 //   8. postMessage everything to the UI which assembles the ZIP
 
-import { collectRasterNodes, captureScreenshots, exportAssets } from './exporter';
+import {
+  captureScreenshots,
+  collectRasterNodes,
+  collectRenderedReferenceCandidates,
+  exportAssets,
+} from './exporter';
+import { buildCanonicalGraph } from './canonical';
+import { foldBreakpointFrames } from './responsive';
+import { buildElementorGlobals } from './elementorGlobals';
+import { rewriteAssetReferences, validateAssetReferences } from './assetValidation';
+import { validateElementorTemplate, validatePageSettings } from './elementorSchema';
 import {
   ImageRegistry,
   PLUGIN_DATA_KEY_PURPOSE,
@@ -452,7 +462,13 @@ function flattenIfArtificialRoot(root: SceneNode): SceneNode[] | null {
   return [...kids];
 }
 
+type RasterCandidate = Awaited<ReturnType<typeof extractTree>>['rasterCandidates'][number];
+
 async function runExtraction() {
+  // Keep hidden children of instances reachable so the canonical graph and
+  // the extractor see the full structure. Visibility is still carried as
+  // data (visible / effectiveVisible); hidden nodes are not rendered.
+  figma.skipInvisibleInstanceChildren = false;
   const resolved = resolveRoots();
   const { roots, pageTitle, flattenedFromRootName, flattenedFromRoot } = resolved;
   if (roots.length === 0) {
@@ -467,7 +483,7 @@ async function runExtraction() {
 
   const registry = new ImageRegistry();
   const trees = [];
-  const rasterCandidates: { nodeId: string; assetId: string; format: 'svg' | 'png' | 'jpg' | 'webp'; assetType: 'image' | 'icon' | 'logo' | 'background' | 'decoration' }[] = [];
+  const rasterCandidates: RasterCandidate[] = [];
   for (let i = 0; i < roots.length; i += 1) {
     const result = await extractTree(roots[i], registry);
     trees.push(result.tree);
@@ -478,8 +494,18 @@ async function runExtraction() {
   const nodeCount = trees.reduce((acc, t) => acc + countNodes(t), 0);
   log('info', `Walked ${nodeCount} nodes.`);
 
+  // Desktop/Tablet/Mobile frames of the same page become ONE page whose
+  // elements carry real responsive overrides, instead of three pages.
+  const allTrees = trees;
+  const folded = foldBreakpointFrames(allTrees);
+  const pageTrees = folded.trees;
+  for (const p of folded.pairs) {
+    log('info', `Paired breakpoint frames for "${p.stem || 'page'}": desktop${p.tablet ? ' + tablet' : ''}${p.mobile ? ' + mobile' : ''}.`);
+  }
+
   log('info', 'Building design tokens...');
-  const tokens = await buildTokens(trees);
+  const tokens = await buildTokens(pageTrees);
+  tokens.elementorGlobals = buildElementorGlobals(tokens);
   post({ type: 'progress', phase: 'tokens', value: 0.45 });
 
   // Build the AI layout *before* mapping so the section-purpose / content-
@@ -489,26 +515,74 @@ async function runExtraction() {
   // Prefer the wrapper's name as the page title even when we flattened it
   // away — that's what the designer named the page, not the first section.
   const title = flattenedFromRootName ?? (roots.length === 1 ? roots[0].name : pageTitle);
-  const aiLayout = buildAILayout(trees, title, flattenedFromRootName);
+  const aiLayout = buildAILayout(pageTrees, title, flattenedFromRootName);
   post({ type: 'progress', phase: 'ai-layout', value: 0.5 });
 
-  log('info', 'Mapping to Elementor JSON...');
-  const template = toElementorTemplate(trees, tokens, title);
-  const tally = tallyTemplate(template);
-  post({ type: 'progress', phase: 'map', value: 0.6 });
-
+  // Assets are exported BEFORE mapping so data.json is written against the
+  // final filenames (real image format, SVG→PNG fallbacks, aliases).
   log('info', `Exporting ${registry.entries().length} image fill(s) + ${rasterCandidates.length} vector(s)...`);
   const rasterNodes = await collectRasterNodes(rasterCandidates);
-  const assets = await exportAssets(rasterNodes, registry);
-  post({ type: 'progress', phase: 'assets', value: 0.8 });
+  const referenceCandidates = collectRenderedReferenceCandidates(allTrees);
+  const exported = await exportAssets(rasterNodes, registry, referenceCandidates);
+  const { assets, report: assetExport, fileMap } = exported;
+  const referenceFiles = new Map<string, string>();
+  for (const a of assets) {
+    if (a.role === 'rendered-reference' && a.nodeId) referenceFiles.set(a.nodeId, a.filename);
+  }
+  if (assetExport.failedAssets.length > 0) {
+    log('warn', `${assetExport.failedAssets.length} asset(s) failed to export — see validation.json.`);
+  }
+  post({ type: 'progress', phase: 'assets', value: 0.6 });
+
+  log('info', 'Mapping to Elementor JSON...');
+  const template = toElementorTemplate(pageTrees, tokens, title, undefined, {
+    assetFiles: fileMap,
+    referenceFiles,
+  });
+  // Safety net: any reference the mapper wrote from a pre-export guess is
+  // rewritten to the finalized filename.
+  const rewrites = rewriteAssetReferences(template, fileMap);
+  if (rewrites > 0) log('info', `Rewrote ${rewrites} asset reference(s) to final filenames.`);
+  const tally = tallyTemplate(template);
+  post({ type: 'progress', phase: 'map', value: 0.8 });
 
   log('info', 'Building asset manifest + validation report...');
-  const assetManifest = buildAssetManifest(trees, assets);
-  const validation = buildValidationReport(trees, tokens);
-  post({ type: 'progress', phase: 'manifest', value: 0.88 });
+  const assetManifest = buildAssetManifest(allTrees, assets, { report: assetExport, registry });
+  const validation = buildValidationReport(pageTrees, tokens);
+  validation.assetExport = assetExport;
+  validation.assetReferences = validateAssetReferences(template, assetManifest, assetExport);
+  validation.elementorSchema = validateElementorTemplate(template);
+  validation.elementorSchema.issues.push(...validatePageSettings(template));
+  const refIssues = validation.assetReferences.brokenAssetReferences.length +
+    validation.assetReferences.missingAssets.length;
+  if (refIssues > 0) {
+    validation.warnings.push({
+      level: 'error',
+      code: 'broken-asset-references',
+      message: `${validation.assetReferences.brokenAssetReferences.length} broken asset reference(s), ${validation.assetReferences.missingAssets.length} missing asset(s) — see validation.json › assetReferences.`,
+    });
+  }
+  const schemaErrors = validation.elementorSchema.issues.filter((i) => i.level === 'error').length;
+  if (schemaErrors > 0) {
+    validation.warnings.push({
+      level: 'error',
+      code: 'elementor-schema',
+      message: `${schemaErrors} Elementor schema error(s) in data.json — see validation.json › elementorSchema.`,
+    });
+  }
+  validation.summary = {
+    info: validation.warnings.filter((w) => w.level === 'info').length,
+    warn: validation.warnings.filter((w) => w.level === 'warn').length,
+    error: validation.warnings.filter((w) => w.level === 'error').length,
+  };
+  post({ type: 'progress', phase: 'manifest', value: 0.86 });
+
+  log('info', 'Building canonical Figma graph...');
+  const canonicalGraph = await buildCanonicalGraph(roots, { registry, assetFiles: fileMap });
+  post({ type: 'progress', phase: 'canonical', value: 0.9 });
 
   log('info', `Capturing screenshots...`);
-  const screenshots = await captureScreenshots(roots, trees, flattenedFromRoot);
+  const screenshots = await captureScreenshots(roots, allTrees, flattenedFromRoot);
   post({ type: 'progress', phase: 'screenshots', value: 0.95 });
 
   const metadata: Metadata = {
@@ -542,6 +616,7 @@ async function runExtraction() {
     aiLayout,
     assetManifest,
     validation,
+    canonicalGraph,
     taggedSummary: listTaggedNodes(),
   });
 }

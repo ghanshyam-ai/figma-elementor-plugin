@@ -16,7 +16,35 @@ export type GradientFill = {
   // anything we didn't normalise.
   transform?: number[][];
 };
-export type ImageFill = { type: 'IMAGE'; assetId: string; scaleMode: string; opacity: number };
+export type ImageFilters = {
+  exposure?: number;
+  contrast?: number;
+  saturation?: number;
+  temperature?: number;
+  tint?: number;
+  highlights?: number;
+  shadows?: number;
+};
+
+// One IMAGE paint. A node can carry several; `fillIndex` is the paint's
+// position in the node's original `fills` array (hidden paints keep their
+// slot), so `nodeId + fillIndex` uniquely identifies a usage.
+export type ImageFill = {
+  type: 'IMAGE';
+  assetId: string;
+  scaleMode: string;
+  opacity: number;
+  fillIndex?: number;
+  imageHash?: string;
+  // 2x3 affine matrix — only present for scaleMode CROP.
+  imageTransform?: number[][];
+  // Only meaningful for scaleMode TILE.
+  scalingFactor?: number;
+  // Degrees, multiples of 90.
+  rotation?: number;
+  filters?: ImageFilters;
+  blendMode?: string;
+};
 export type Fill = SolidFill | GradientFill | ImageFill;
 
 export type Padding = { top: number; right: number; bottom: number; left: number };
@@ -59,6 +87,12 @@ export type TextStyle = {
   // The base style above still describes the dominant run; runs preserve
   // the per-character deltas Claude needs to reconstruct the prose.
   runs?: TextRun[];
+  // Whole-node paragraph / link / list / OpenType data (the dominant run).
+  paragraphSpacing?: number;
+  paragraphIndent?: number;
+  hyperlink?: { type: 'URL' | 'NODE'; value: string };
+  listOptions?: { type: 'NONE' | 'ORDERED' | 'UNORDERED' };
+  openTypeFeatures?: Record<string, boolean>;
 };
 
 export type TextRun = {
@@ -66,12 +100,24 @@ export type TextRun = {
   end: number;
   text: string;
   fontFamily?: string | null;
+  fontStyle?: string | null;
   fontWeight?: number | null;
   fontSize?: number | null;
   color?: string | null;
+  // Every visible paint on the run, not just the first solid.
+  fills?: Fill[];
+  lineHeight?: { value: number; unit: 'PIXELS' | 'PERCENT' } | 'AUTO' | null;
+  letterSpacing?: { value: number; unit: 'PIXELS' | 'PERCENT' } | null;
   textDecoration?: string | null;
+  textDecorationStyle?: string | null;
   textCase?: string | null;
   link?: { type: 'URL' | 'NODE'; value: string };
+  listOptions?: { type: 'NONE' | 'ORDERED' | 'UNORDERED' };
+  indentation?: number;
+  paragraphSpacing?: number;
+  paragraphIndent?: number;
+  // OpenType feature flags that are switched on (e.g. { LIGA: true }).
+  openTypeFeatures?: Record<string, boolean>;
 };
 
 export type Stroke = {
@@ -131,7 +177,7 @@ export type AssetType =
   | 'background'
   | 'decoration';
 
-export type AssetFormat = 'svg' | 'png' | 'jpg' | 'webp';
+export type AssetFormat = 'svg' | 'png' | 'jpg' | 'webp' | 'gif';
 
 export type RoleConfidence = {
   role: SemanticRole;
@@ -140,6 +186,44 @@ export type RoleConfidence = {
 };
 
 export type Bounds = { x: number; y: number; width: number; height: number };
+
+// Figma's 2x3 affine transform: [[a, c, tx], [b, d, ty]].
+export type Transform2x3 = [[number, number, number], [number, number, number]];
+
+export type ComponentPropertyValue = {
+  type: string;
+  value: string | boolean;
+  preferredValues?: unknown[];
+  boundVariables?: Record<string, unknown>;
+};
+
+export type ComponentMeta = {
+  // INSTANCE: id/name of the main component it was made from.
+  mainComponentId?: string;
+  mainComponentName?: string;
+  mainComponentKey?: string;
+  mainComponentRemote?: boolean;
+  componentSetId?: string;
+  componentSetName?: string;
+  // INSTANCE: current property values.
+  componentProperties?: Record<string, ComponentPropertyValue>;
+  // COMPONENT / COMPONENT_SET: declared properties.
+  componentPropertyDefinitions?: Record<string, {
+    type: string;
+    defaultValue?: string | boolean;
+    variantOptions?: string[];
+    preferredValues?: unknown[];
+  }>;
+  // Which layer props are driven by which component property.
+  componentPropertyReferences?: Record<string, string>;
+  variantProperties?: Record<string, string>;
+};
+
+export type NodeVariables = {
+  boundVariables?: Record<string, unknown>;
+  explicitVariableModes?: Record<string, string>;
+  resolvedVariableModes?: Record<string, string>;
+};
 
 export type ComputedStyle = {
   display?: 'flex' | 'block' | 'absolute';
@@ -241,6 +325,25 @@ export type PreferredWidget =
   | 'social-icons'
   | 'video'
   | 'container';
+
+export type BreakpointName = 'tablet' | 'mobile';
+
+// Differences between a desktop node and its counterpart in an explicit
+// tablet/mobile Figma frame. Only fields that actually differ are set.
+export type ResponsiveDelta = {
+  layoutMode?: 'HORIZONTAL' | 'VERTICAL';
+  itemSpacing?: number;
+  padding?: Padding;
+  primaryAlign?: string;
+  counterAlign?: string;
+  wrap?: boolean;
+  // 'FILL' = stretch to parent, number = fixed px width.
+  width?: number | 'FILL';
+  fontSize?: number;
+  lineHeight?: { value: number; unit: 'PIXELS' | 'PERCENT' } | 'AUTO';
+  letterSpacing?: { value: number; unit: 'PIXELS' | 'PERCENT' };
+  align?: 'LEFT' | 'CENTER' | 'RIGHT' | 'JUSTIFIED';
+};
 
 export type BreakpointHints = {
   mobileCollapse?: boolean;
@@ -373,8 +476,24 @@ export type ExtractedNode = {
   height: number;
   absoluteBounds?: Bounds;
   relativeBounds?: Bounds;
+  // Bounds including shadows / blur / strokes that spill outside the box.
+  renderBounds?: Bounds;
+  // True when effects, strokes or rotation push pixels beyond absoluteBounds.
+  extendsBeyondBounds?: boolean;
+  // Full 2x3 affine matrices ([[a,c,tx],[b,d,ty]]). relativeTransform is
+  // inverse(parent.absoluteTransform) × child.absoluteTransform.
+  absoluteTransform?: Transform2x3;
+  relativeTransform?: Transform2x3;
   rotation?: number;
+  // `visible` is the node's own flag; `effectiveVisible` also requires every
+  // ancestor to be visible. Hidden nodes are kept structurally but not rendered.
+  effectiveVisible?: boolean;
+  // Masking intent as authored in Figma — never collapsed into overflow.
+  isMask?: boolean;
+  maskType?: 'ALPHA' | 'VECTOR' | 'LUMINANCE';
+  clipsContent?: boolean;
   opacity?: number;
+  blendMode?: string;
   cornerRadius?: number | { tl: number; tr: number; br: number; bl: number };
   fills: Fill[];
   strokes: Stroke[];
@@ -426,6 +545,9 @@ export type ExtractedNode = {
   // - instanceGroup: cluster id assigned to sibling fingerprints in the
   //   same parent (e.g. "pricing-card-group-1").
   componentId?: string;
+  component?: ComponentMeta;
+  // Node-level variable bindings + the modes in force.
+  variables?: NodeVariables;
   componentFingerprint?: string;
   instanceGroup?: string;
   // Hover/focus/active/disabled deltas pulled from Figma component variants.
@@ -434,6 +556,11 @@ export type ExtractedNode = {
   inputMetadata?: InputMetadata;
   // Per-node responsive behavior hints
   breakpoints?: BreakpointHints;
+  // Real per-breakpoint overrides computed from paired Figma frames.
+  responsive?: Partial<Record<BreakpointName, ResponsiveDelta>>;
+  // Set on a root: the breakpoints that were paired in from explicit
+  // frames. The mapper then skips heuristic collapse assumptions.
+  pairedBreakpoints?: BreakpointName[];
   // CSS-like computed style snapshot, useful for AI consumers
   style?: ComputedStyle;
   // bound Figma style ids (resolved by tokens.ts to names)
@@ -458,6 +585,31 @@ export type Asset = {
   // Other node-derived asset ids (icon_<nodeId>) that resolved to the same
   // content. Populated by the exporter when duplicate vectors collapsed.
   aliasIds?: string[];
+  // 'original' = the asset bytes themselves; 'rendered-reference' = a 2x
+  // Figma render of a node whose crop/mask/filter/transform the original
+  // file alone cannot reproduce.
+  role?: 'original' | 'rendered-reference';
+  // For rendered references: the original asset it accompanies and the node
+  // it was rendered from.
+  referenceFor?: string;
+  nodeId?: string;
+  // Set when the container format could not be sniffed from the bytes and
+  // the extension is a best-effort guess.
+  formatUnverified?: boolean;
+};
+
+// Queued vs. actually-exported tracking. An asset only counts as successful
+// once its bytes were produced; everything else lands in failedAssets.
+export type AssetExportReport = {
+  queuedAssets: { id: string; source: 'image-fill' | 'node-render' | 'rendered-reference'; nodeId?: string }[];
+  successfulAssets: { id: string; filename: string }[];
+  failedAssets: { id: string; reason: string }[];
+};
+
+// Output of the post-mapping reference check over data.json + assets.json.
+export type AssetReferenceReport = {
+  missingAssets: { id: string; referencedBy: string[] }[];
+  brokenAssetReferences: { url: string; elementId?: string; figmaId?: string; reason: string }[];
 };
 
 export type Screenshot = {
@@ -517,6 +669,32 @@ export type ColorUsageContext = {
   total: number;
 };
 
+// Elementor Kit mapping layer. Shapes follow Elementor's own Kit data
+// (system_colors / custom_colors / system_typography / custom_typography)
+// so a WordPress-side importer can write them straight into the active Kit,
+// then resolve each `references` entry into `__globals__` on the widgets.
+export type ElementorGlobalColor = { _id: string; title: string; color: string; tokenPath: string };
+export type ElementorGlobalFont = {
+  _id: string;
+  title: string;
+  tokenPath: string;
+  typography_typography: 'custom';
+  typography_font_family?: string;
+  typography_font_weight?: number | string;
+  typography_font_size?: { unit: 'px'; size: number; sizes: [] };
+  typography_line_height?: { unit: 'px' | 'em'; size: number; sizes: [] };
+  typography_letter_spacing?: { unit: 'px'; size: number; sizes: [] };
+};
+export type ElementorGlobals = {
+  colors: { system: ElementorGlobalColor[]; custom: ElementorGlobalColor[] };
+  typography: { system: ElementorGlobalFont[]; custom: ElementorGlobalFont[] };
+  // Elementor Site Settings (Kit) keys derived from the same tokens.
+  siteSettings: Record<string, unknown>;
+  // Figma token path → Elementor global reference string.
+  references: Record<string, string>;
+  notes: string[];
+};
+
 export type DesignTokens = {
   colors: {
     name: string;
@@ -565,6 +743,8 @@ export type DesignTokens = {
   variables?: FigmaVariableToken[];
   // semantic flat lookup map: "color.primary" -> "#635BFF"
   semantic?: Record<string, string | number>;
+  // Mapping layer for Elementor Global Colors / Fonts / Site Settings.
+  elementorGlobals?: ElementorGlobals;
 };
 
 export type Metadata = {
@@ -657,6 +837,53 @@ export type AILayout = {
   componentTemplates?: ComponentTemplate[];
 };
 
+// --- Canonical Figma graph ----------------------------------------------
+//
+// canonical-graph.json is the raw, mapper-independent evidence layer:
+//   Figma → canonical-graph.json → Elementor mapper → data.json
+// It holds every node (hidden ones included) exactly as Figma reports it.
+// data.json stays the primary Elementor artifact.
+
+export type CanonicalNode = {
+  id: string;
+  name: string;
+  type: string;
+  parentId: string | null;
+  childIds: string[];
+  visible: boolean;
+  effectiveVisible: boolean;
+  geometry: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    rotation?: number;
+    absoluteBoundingBox?: Bounds;
+    absoluteRenderBounds?: Bounds;
+  };
+  transforms: { absoluteTransform?: Transform2x3; relativeTransform?: Transform2x3 };
+  layout: Record<string, unknown>;
+  fills: unknown[];
+  strokes: { paints: unknown[]; weight?: unknown; align?: string; dashPattern?: number[]; cap?: unknown; join?: unknown };
+  effects: unknown[];
+  cornerRadius?: unknown;
+  opacity?: number;
+  blendMode?: string;
+  mask: { isMask?: boolean; maskType?: string; clipsContent?: boolean };
+  text?: { characters: string; fontName?: unknown; fontSize?: unknown; segments?: TextRun[] };
+  component?: ComponentMeta;
+  variables?: NodeVariables;
+  prototype?: unknown[];
+};
+
+export type CanonicalGraph = {
+  schemaVersion: 1;
+  generatedAt: string;
+  rootIds: string[];
+  nodeCount: number;
+  nodes: Record<string, CanonicalNode>;
+};
+
 // --- Asset manifest -----------------------------------------------------
 
 export type AssetManifestEntry = {
@@ -674,6 +901,25 @@ export type AssetManifestEntry = {
   // Other assetIds that collapsed to this canonical entry. Use these when
   // mapping a widget that references a non-canonical id back to the file.
   aliasIds?: string[];
+  // Every (node, fill slot) painting this image, plus the final export state.
+  usages?: { nodeId: string; fillIndex: number }[];
+  role?: 'original' | 'rendered-reference';
+  referenceFor?: string;
+  exportStatus?: 'exported' | 'failed';
+};
+
+export type ElementorSchemaIssue = {
+  level: 'error' | 'warn';
+  code: string;
+  message: string;
+  elementId?: string;
+  figmaId?: string;
+  key?: string;
+};
+
+export type ElementorSchemaReport = {
+  checkedElements: number;
+  issues: ElementorSchemaIssue[];
 };
 
 // --- Validation report --------------------------------------------------
@@ -689,6 +935,11 @@ export type ValidationWarning = {
 export type ValidationReport = {
   generatedAt: string;
   warnings: ValidationWarning[];
+  // Final data.json ↔ assets/ reference check and queued/successful/failed
+  // export tracking. Filled in after assets are exported.
+  assetReferences?: AssetReferenceReport;
+  assetExport?: AssetExportReport;
+  elementorSchema?: ElementorSchemaReport;
   summary: {
     info: number;
     warn: number;
@@ -698,23 +949,46 @@ export type ValidationReport = {
 
 // --- Elementor JSON shape (subset used by exporters) ---
 
-export type ElementorWidgetType = 'heading' | 'text-editor' | 'image' | 'button' | 'spacer' | 'divider';
+export type ElementorWidgetType =
+  | 'heading'
+  | 'text-editor'
+  | 'image'
+  | 'button'
+  | 'spacer'
+  | 'divider'
+  | 'counter'
+  | 'icon-list'
+  | 'image-carousel'
+  | 'accordion'
+  | 'tabs'
+  | 'form';
+
+// Elementor serialises an empty settings/page_settings block as a JSON array
+// (`[]`), not an object (`{}`) — that is what its own exporter emits and what
+// the importer round-trips cleanly. Populated blocks are objects. The union
+// mirrors that contract; use `emptyToArray()` in the mapper to produce it.
+export type ElementorSettings = Record<string, unknown> | unknown[];
 
 export type ElementorElement = {
   id: string;
   elType: 'container' | 'widget';
   widgetType?: ElementorWidgetType;
-  settings: Record<string, unknown>;
+  settings: ElementorSettings;
   elements: ElementorElement[];
   isInner?: boolean;
 };
 
+// Elementor template kinds. `page` is the default; header/footer/popup are
+// Theme-Builder template types that carry a `content_wrapper_html_tag` (and,
+// for popups, display/animation settings) in page_settings.
+export type ElementorTemplateType = 'page' | 'header' | 'footer' | 'popup';
+
 export type ElementorTemplate = {
   version: '0.4';
   title: string;
-  type: 'page';
+  type: ElementorTemplateType;
   content: ElementorElement[];
-  page_settings: Record<string, unknown>;
+  page_settings: ElementorSettings;
 };
 
 // --- Plugin <-> UI message protocol ---
@@ -790,6 +1064,7 @@ export type PluginToUIMessage =
       aiLayout: AILayout;
       assetManifest: AssetManifestEntry[];
       validation: ValidationReport;
+      canonicalGraph: CanonicalGraph;
       taggedSummary: TaggedNodeSummary[];
     }
   | { type: 'preflight-result'; warnings: ValidationWarning[] }
